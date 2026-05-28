@@ -1,72 +1,68 @@
 #!/bin/bash
 set -e
 
-# Get the directory where this script lives
+# Refuse to run inside a container
+if [ -f /.dockerenv ]; then
+  echo "Error: aisand cannot be run inside an aisand container"
+  exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCKERFILE="$SCRIPT_DIR/Dockerfile"
 
-# Check that Dockerfile exists
 if [ ! -f "$DOCKERFILE" ]; then
   echo "Error: Dockerfile not found at $DOCKERFILE"
   exit 1
 fi
 
-# Handle subcommands
-if [ "$1" == "rebuild" ]; then
-  if [ ! -d .git ]; then
-    echo "Error: Not in a git repository root"
-    exit 1
-  fi
-  REPO_NAME="$(basename "$(pwd)")"
-  IMAGE_TAG="aisand-${REPO_NAME}"
-  echo "Rebuilding Docker image: $IMAGE_TAG"
-  docker build -f "$DOCKERFILE" -t "$IMAGE_TAG" "$SCRIPT_DIR"
-  exit 0
-fi
+# A single image is shared across all aisand projects.
+IMAGE_TAG="aisand"
 
 if [ "$1" == "prune" ]; then
   echo "Removing all aisand images and volumes..."
-  docker image prune -f --filter 'reference=aisand-*'
-  # Remove all aisand-* volumes
-  VOLUMES=$(docker volume ls -q --filter 'name=^aisand-' 2>/dev/null || true)
-  if [ -n "$VOLUMES" ]; then
-    echo "$VOLUMES" | xargs docker volume rm 2>/dev/null || true
-  fi
+  docker images -q --filter 'reference=aisand*' \
+    | xargs --no-run-if-empty docker rmi -f
+  docker volume ls -q --filter 'name=^aisand-' \
+    | xargs --no-run-if-empty docker volume rm
   echo "Cleanup complete."
   exit 0
 fi
 
-# Normal operation: check for .git in current directory
-if [ ! -d .git ]; then
-  echo "Error: Not in a git repository root (no .git/ directory found)"
+if [ "$1" == "rebuild" ]; then
+  echo "Deleting old image: $IMAGE_TAG"
+  docker image rm "$IMAGE_TAG" 2>/dev/null || true
+  # Fall through to normal build and launch
+fi
+
+# Allow .git to be either a directory (normal clone) or a file (worktree)
+if [ ! -e .git ]; then
+  echo "Error: Not in a git repository root (no .git found)"
   echo "Usage: cd /path/to/git/repo && aisand"
-  echo "       aisand rebuild   (force rebuild Docker image)"
+  echo "       aisand rebuild   (delete and rebuild Docker image, then launch)"
   echo "       aisand prune     (remove all aisand images and volumes)"
   exit 1
 fi
 
-# Check for API key
 if [ -z "$ANTHROPIC_API_KEY" ]; then
   echo "Error: ANTHROPIC_API_KEY not set in environment"
   echo "Set it with: export ANTHROPIC_API_KEY=\"sk-ant-...\""
   exit 1
 fi
 
-# Get repository info
 REPO_ROOT="$(pwd)"
 REPO_NAME="$(basename "$REPO_ROOT")"
-IMAGE_TAG="aisand-${REPO_NAME}"
-MEMORY_VOLUME="aisand-${REPO_NAME}-memory"
+REPO_NAME_SAFE="$(echo -n "$REPO_NAME" | tr -c 'a-zA-Z0-9._-' '_')"
+PATH_HASH="$(echo -n "$REPO_ROOT" | sha256sum | cut -c1-8)"
+MEMORY_VOLUME="aisand-${REPO_NAME_SAFE}-${PATH_HASH}-memory"
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "aisand: Claude Code Sandbox"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "Repository: $REPO_ROOT"
-echo "Image: $IMAGE_TAG"
+echo "Repository:    $REPO_ROOT"
+echo "Image:         $IMAGE_TAG"
 echo "Memory volume: $MEMORY_VOLUME"
 echo ""
 
-# Build or use cached image
 if ! docker image inspect "$IMAGE_TAG" > /dev/null 2>&1; then
   echo "Building Docker image (first run, this takes a minute)..."
   docker build -f "$DOCKERFILE" -t "$IMAGE_TAG" "$SCRIPT_DIR"
@@ -74,30 +70,58 @@ else
   echo "Using cached Docker image"
 fi
 
-# Ensure memory volume exists
+# Create the memory volume if needed, and chown it to the host user so
+# the non-root container process can write to it.
 if ! docker volume inspect "$MEMORY_VOLUME" > /dev/null 2>&1; then
   echo "Creating memory volume..."
-  docker volume create "$MEMORY_VOLUME"
+  docker volume create "$MEMORY_VOLUME" > /dev/null
+  echo "Initializing memory volume ownership..."
+  docker run --rm --user root \
+    -v "$MEMORY_VOLUME:/init" \
+    "$IMAGE_TAG" \
+    chown "$(id -u):$(id -g)" /init
 fi
 
+# Generate /etc/passwd and /etc/group entries so the host user has a
+# proper identity inside the container (no "I have no name!" prompt,
+# git/npm/etc. can resolve $HOME and $USER).
+PASSWD_FILE="$(mktemp)"
+GROUP_FILE="$(mktemp)"
+trap 'rm -f "$PASSWD_FILE" "$GROUP_FILE"' EXIT
+
+cat > "$PASSWD_FILE" <<EOF
+root:x:0:0:root:/root:/bin/bash
+${USER}:x:$(id -u):$(id -g):${USER}:${HOME}:/bin/bash
+EOF
+
+cat > "$GROUP_FILE" <<EOF
+root:x:0:
+${USER}:x:$(id -g):
+EOF
+
 echo ""
-echo "Launching interactive shell in container..."
-echo "Your project is mounted at: $REPO_ROOT"
-echo "Claude's memory persists in: $MEMORY_VOLUME"
+echo "Launching interactive shell..."
+echo "Project: $REPO_ROOT"
 echo "Exit with Ctrl+D or 'exit' to destroy the container"
 echo ""
 
-# Run container with security constraints and mounts
 docker run --rm -it \
   --user "$(id -u):$(id -g)" \
+  --hostname "aisand-${REPO_NAME_SAFE}" \
   --security-opt=no-new-privileges \
   --cap-drop=all \
   --memory=4g \
   --cpus=4 \
+  --tmpfs "$HOME":uid=$(id -u),gid=$(id -g),mode=755,size=512m \
+  -w "$REPO_ROOT" \
+  -e HOME="$HOME" \
+  -e USER="$USER" \
   -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  -v "$PASSWD_FILE:/etc/passwd:ro" \
+  -v "$GROUP_FILE:/etc/group:ro" \
   -v "$REPO_ROOT:$REPO_ROOT" \
-  -v "$MEMORY_VOLUME:/home/claude/.claude" \
+  -v "$MEMORY_VOLUME:$HOME/.claude" \
   "$IMAGE_TAG"
 
 echo ""
-echo "Container destroyed. Your project files and memory remain on disk."
+echo "Container destroyed. Project files and memory remain on disk."

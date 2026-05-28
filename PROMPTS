@@ -90,3 +90,35 @@ Other than that, it's looking very good and about ready to test
 ===
 
 Is there a benefit to creating a user "claude" inside the container?  Would there be a drawback to using $USER ?
+
+===
+
+What about mounting the memory on /home/pace/.claude inside the container, so that the default paths for that will work?
+
+I'll want to easily tell which shells are in the container.  Maybe add "SB" in red to the start of PS1.
+
+Let's not duplicate the "docker build" command.  Have the rebuild argument just delete the old container and continue to build and launch a new container.
+
+Make aisand detect and abort if it is run within an aisand container.
+
+===
+
+Ah, it's backslash-enter in this ui.
+
+I just remembered about model choices.  We've done this work in Haiku 4.5.  I think I should change to a fancier model and ask it to review the work so far.  If I do that, will our conversation have continuity, or do I need to write stuff into memory first?
+
+===
+
+We've been designing aisand using the Haiku model and are just at the point of being ready to test.  I've just switch the model to Opus 4.7.  Please review the work so far and suggest any improvements that you notice.
+
+===
+
+Thanks.  I agree with your assessment, and in general, where you offered choices, I'm fine with your recommendation or ambivalent.  Since the files are just drafts now, I think you should make all the edits before the first test ... there's no point in testing stuff that is about to change.
+
+I interpreted the original question about whether localhost access should be allowed as: "Do I need to let a program running in the container access http://localhost:3000" and my answer is no, that's not needed.  I don't think I feel sensitive to anything that a local service could spit out in an unauthenticated response.  So I don't need put a lot of effort into closing that path.  I'm fine with documenting the limit as a soft claim.
+
+Regarding starting in /home/claude ... what is the point of the claude user in the container anyway?  Why not use $USER?
+
+It does look like one image will be fine for the current usage plan.  aisand can evolve as I use it.
+
+

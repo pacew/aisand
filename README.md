@@ -23,8 +23,11 @@ An attacker learns what kind of project you're working on, finds a community for
 **Defense strategy:**
 1. **Containment:** Docker isolates the container filesystem from the host. Only your project directory (git repo) is visible to Claude Code.
 2. **Audit:** You review all code changes with `meld` (or similar) outside the container before running anything with broader access.
-3. **Network isolation:** Outbound network is allowed (package downloads, external APIs) but the container cannot reach your host services or inbound connections.
+3. **Network:** Outbound network is allowed (package downloads, external APIs). No inbound connections. Host services on `localhost` are not actively blocked — see "Soft limits" below.
 4. **Credentials:** Only the Anthropic API key is exposed to Claude Code. All other credentials stay outside.
+
+**Soft limits (not actively enforced):**
+- Host services on `localhost` may be reachable from the container via the Docker bridge gateway. The mitigation is not running sensitive unauthenticated services on dev ports. We don't enforce blocking because the user's threat model doesn't require it.
 
 ## Architecture
 
@@ -32,19 +35,23 @@ An attacker learns what kind of project you're working on, finds a community for
 ┌──────────────────────────────────────────────────┐
 │ Your Host Machine                                │
 ├──────────────────────────────────────────────────┤
-│  /home/user/projects/my-project/ (git repo)     │
-│         ↓ (mounted as /home/user/projects/...) │
+│  /home/user/projects/my-project/  (git repo)    │
+│         ↓ (bind mount)                          │
 │  ┌────────────────────────────────────────────┐ │
 │  │ Docker Container (ephemeral per run)       │ │
-│  │  /home/user/projects/my-project/ (rw)     │ │
-│  │  ~/.claude/ (persistent volume)            │ │
-│  │  /tmp (rw) ← build artifacts               │ │
-│  │  Claude Code CLI                           │ │
-│  │  Python, C tools                           │ │
-│  │  Network: outbound only                    │ │
+│  │  hostname: aisand-my-project               │ │
+│  │  user: host UID/GID                        │ │
+│  │  prompt: red "SB" marker                   │ │
+│  │  cwd: /home/user/projects/my-project/      │ │
+│  │  $HOME: tmpfs, ephemeral                   │ │
+│  │  ~/.claude/: ← memory volume               │ │
+│  │  /tmp: writable                            │ │
+│  │  network: outbound only                    │ │
+│  │  Claude Code CLI, Python, C tools          │ │
 │  └────────────────────────────────────────────┘ │
-│  Docker Volume: aisand-my-project-memory        │
-│         (Claude's memory, persists)             │
+│  Docker Volume:                                  │
+│    aisand-my-project-{path-hash}-memory         │
+│      (Claude's memory, persists)                │
 │                                                  │
 │  Review changes outside container               │
 │  (meld, git diff, etc.)                         │
@@ -53,10 +60,15 @@ An attacker learns what kind of project you're working on, finds a community for
 ```
 
 - **Container:** Fresh ephemeral container on each `aisand` run. Destroyed on exit.
-- **Project volume:** Your git repo mounted at its actual path (e.g., `/home/user/projects/my-project/`).
-- **Memory volume:** Claude's memory persists across runs in a named Docker volume (`aisand-{repo-name}-memory`).
+- **Image:** A single image (`aisand`) is shared across all projects.
+- **User:** Container runs as your host UID/GID, with `/etc/passwd` and `/etc/group` provided at runtime so `$USER` and `$HOME` work normally.
+- **Prompt:** Container shells marked with red `SB` at the start of `PS1` for quick identification.
+- **Hostname:** Container hostname set to `aisand-{repo-name}` so it's visible in shell prompts and process listings.
+- **Project mount:** Your git repo mounted at its actual path (e.g., `/home/user/projects/my-project/`), with your working directory set there on entry.
+- **Memory volume:** Claude's memory persists in `~/.claude/` via a named Docker volume (`aisand-{repo-name}-{path-hash}-memory`). The path hash prevents collisions between same-named repos in different locations.
+- **Home tmpfs:** `$HOME` is a tmpfs (512 MB) so tools that write to `~/.gitconfig`, `~/.cache`, etc. work without polluting the host. These writes are ephemeral; only `~/.claude/` persists.
 - **Credentials:** Only `ANTHROPIC_API_KEY` is visible inside.
-- **Network:** Outbound unrestricted; no inbound; no access to `localhost:*` on host.
+- **Nesting protection:** `aisand` refuses to run inside an existing container.
 
 ## Installation
 
@@ -92,16 +104,17 @@ The script will:
 4. Create or reuse a Docker volume for Claude's memory
 5. Launch an interactive shell inside the container with your project at its original path
 
-Inside the container, interact with Claude Code normally:
+You land in your project directory inside the container. Interact with Claude Code normally:
 
 ```bash
-# Inside the container
-cd ~/projects/my-project
+# Inside the container — already in your project directory
 claude --help
 # ... collaborate with Claude Code on your project
 ```
 
 When you exit the container (Ctrl+D or `exit`), it's destroyed. Your project files and Claude's memory persist on the host.
+
+**Note:** Don't run `claude update` inside the container — Claude Code is installed system-wide and the non-root container user can't update it. Use `aisand rebuild` instead.
 
 ### Multi-window workflow
 
@@ -145,11 +158,12 @@ git push
 
 The Docker container runs with:
 
-- **Dropped capabilities:** `--cap-drop=all` — removes elevated privileges needed to modify host or escalate inside container
-- **No privilege escalation:** `--security-opt=no-new-privileges` — prevents setuid binaries from gaining extra privs
-- **Resource limits:** Memory capped at 4GB, CPU at 4 cores — protects against fork bombs
-- **Network:** Outbound allowed, inbound blocked, localhost unreachable
-- **Filesystem:** Your project directory and `/tmp` are writable; everything else is the container root
+- **Non-root user:** Runs as your host UID/GID, not as root.
+- **Dropped capabilities:** `--cap-drop=all` — removes elevated privileges needed to modify host or escalate inside container.
+- **No privilege escalation:** `--security-opt=no-new-privileges` — prevents setuid binaries from gaining extra privs.
+- **Resource limits:** Memory capped at 4 GB, CPU at 4 cores — protects against fork bombs and runaway processes.
+- **Network:** Outbound allowed, no inbound. Host services on `localhost` are not actively blocked.
+- **Filesystem:** Your project directory and `~/.claude/` are persistent. `$HOME` (above `.claude/`), `/tmp`, and the container root are writable but ephemeral.
 
 ## Assumptions & Limitations
 
@@ -167,6 +181,8 @@ Docker images and memory volumes are cached by project name for speed.
 ```bash
 aisand rebuild
 ```
+
+This deletes the old image and builds a fresh one, then launches the container.
 
 **Clean up all aisand images and volumes:**
 
@@ -205,9 +221,10 @@ Next run will create a fresh memory volume.
 
 ## Implementation Notes
 
-- **Dockerfile:** Debian base, Python 3, GCC/embedded C toolchain, Node.js, Claude Code CLI
-- **Launch script:** Bash; finds `.git`, validates environment, builds image, manages memory volume, runs container
-- **Image tag:** Based on project name (`aisand-{repo-name}`)
-- **Project mount:** Git repo mounted at its actual path (e.g., `/home/user/projects/my-project/`)
-- **Memory volume:** Named volume `aisand-{repo-name}-memory` mounted at `/home/claude/.claude`
-- **Subcommands:** `aisand rebuild` and `aisand prune` for image/volume management
+- **Dockerfile:** Debian bookworm-slim base, Python 3 + venv, GCC/G++/make for C, Node.js + npm, Claude Code CLI. No user is created in the image; the launch script provides one at runtime.
+- **Launch script:** Bash; checks for `.git`, validates environment, builds the shared `aisand` image on first use, manages a per-project memory volume, generates `/etc/passwd` and `/etc/group` for the host user, runs the container.
+- **Image tag:** Single shared image `aisand` (was previously per-project; identical content made that wasteful).
+- **Project mount:** Git repo bind-mounted at its actual host path inside the container.
+- **Memory volume:** Named volume `aisand-{repo-name-safe}-{path-hash}-memory` mounted at `$HOME/.claude`. The path hash prevents collisions between same-named repos in different locations.
+- **Home tmpfs:** `$HOME` is a tmpfs so tools that write to `~/.gitconfig`, `~/.cache`, etc. work without polluting the host.
+- **Subcommands:** `aisand rebuild` (delete image, rebuild, launch) and `aisand prune` (remove all aisand images and volumes).
