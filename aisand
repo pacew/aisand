@@ -1,0 +1,103 @@
+#!/bin/bash
+set -e
+
+# Get the directory where this script lives
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DOCKERFILE="$SCRIPT_DIR/Dockerfile"
+
+# Check that Dockerfile exists
+if [ ! -f "$DOCKERFILE" ]; then
+  echo "Error: Dockerfile not found at $DOCKERFILE"
+  exit 1
+fi
+
+# Handle subcommands
+if [ "$1" == "rebuild" ]; then
+  if [ ! -d .git ]; then
+    echo "Error: Not in a git repository root"
+    exit 1
+  fi
+  REPO_NAME="$(basename "$(pwd)")"
+  IMAGE_TAG="aisand-${REPO_NAME}"
+  echo "Rebuilding Docker image: $IMAGE_TAG"
+  docker build -f "$DOCKERFILE" -t "$IMAGE_TAG" "$SCRIPT_DIR"
+  exit 0
+fi
+
+if [ "$1" == "prune" ]; then
+  echo "Removing all aisand images and volumes..."
+  docker image prune -f --filter 'reference=aisand-*'
+  # Remove all aisand-* volumes
+  VOLUMES=$(docker volume ls -q --filter 'name=^aisand-' 2>/dev/null || true)
+  if [ -n "$VOLUMES" ]; then
+    echo "$VOLUMES" | xargs docker volume rm 2>/dev/null || true
+  fi
+  echo "Cleanup complete."
+  exit 0
+fi
+
+# Normal operation: check for .git in current directory
+if [ ! -d .git ]; then
+  echo "Error: Not in a git repository root (no .git/ directory found)"
+  echo "Usage: cd /path/to/git/repo && aisand"
+  echo "       aisand rebuild   (force rebuild Docker image)"
+  echo "       aisand prune     (remove all aisand images and volumes)"
+  exit 1
+fi
+
+# Check for API key
+if [ -z "$ANTHROPIC_API_KEY" ]; then
+  echo "Error: ANTHROPIC_API_KEY not set in environment"
+  echo "Set it with: export ANTHROPIC_API_KEY=\"sk-ant-...\""
+  exit 1
+fi
+
+# Get repository info
+REPO_ROOT="$(pwd)"
+REPO_NAME="$(basename "$REPO_ROOT")"
+IMAGE_TAG="aisand-${REPO_NAME}"
+MEMORY_VOLUME="aisand-${REPO_NAME}-memory"
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "aisand: Claude Code Sandbox"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "Repository: $REPO_ROOT"
+echo "Image: $IMAGE_TAG"
+echo "Memory volume: $MEMORY_VOLUME"
+echo ""
+
+# Build or use cached image
+if ! docker image inspect "$IMAGE_TAG" > /dev/null 2>&1; then
+  echo "Building Docker image (first run, this takes a minute)..."
+  docker build -f "$DOCKERFILE" -t "$IMAGE_TAG" "$SCRIPT_DIR"
+else
+  echo "Using cached Docker image"
+fi
+
+# Ensure memory volume exists
+if ! docker volume inspect "$MEMORY_VOLUME" > /dev/null 2>&1; then
+  echo "Creating memory volume..."
+  docker volume create "$MEMORY_VOLUME"
+fi
+
+echo ""
+echo "Launching interactive shell in container..."
+echo "Your project is mounted at: $REPO_ROOT"
+echo "Claude's memory persists in: $MEMORY_VOLUME"
+echo "Exit with Ctrl+D or 'exit' to destroy the container"
+echo ""
+
+# Run container with security constraints and mounts
+docker run --rm -it \
+  --user "$(id -u):$(id -g)" \
+  --security-opt=no-new-privileges \
+  --cap-drop=all \
+  --memory=4g \
+  --cpus=4 \
+  -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  -v "$REPO_ROOT:$REPO_ROOT" \
+  -v "$MEMORY_VOLUME:/home/claude/.claude" \
+  "$IMAGE_TAG"
+
+echo ""
+echo "Container destroyed. Your project files and memory remain on disk."

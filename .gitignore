@@ -1,0 +1,11 @@
+# Editor backups
+*~
+.#*
+\#*\#
+
+# OS
+.DS_Store
+.vscode/
+
+# Docker build artifacts (if any)
+.docker/

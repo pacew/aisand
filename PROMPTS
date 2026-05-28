@@ -1,0 +1,92 @@
+-*- mode:visual-line -*-
+
+I'm pretty new to claude.  I dabbled with it a couple of months ago.  Now that I've come back to it, I'm being asked about an "Auth conflict" and given 2 choices (token or API key).  How do I choose?
+
+
+I've been using Gemini's chat interface to do some coding projects, with a lot of copy and pasting.  I want to try claude code, but I want to build a simple docker sandbox that I can understand and that will give me some confidence that the model won't be able to do damage to the rest of my laptop.  I want the model to have unlimited access to the external network and to read and write and execute local files in a designated subtree of my host file system.  I'll assume that the model will be subject to malicious (even targeted) prompt injection since it will be reading from external sources, so I'll assume anything it writes to local files might be tainted.  I'll mitigate that risk by making sure never to store an authentication credentials in the subtree (except thoese necessary to make claude code work), and by essentially code reviewing anything it has written before I run it outside of the container.
+
+First, let's refine this strategy.  You can tell me about related work that may already be available and ask me questions to clarify what I want and expose hidden implications.  If it seems like a good idea to implement this, we'll next write a README.md file to record the plan, and then create the docker configuration and launch files.
+
+===
+
+I want Option A, run claude code inside the container.
+
+For threat model, this is a little fanciful but let's try to make it safe against this attack. An attacker stalks me and figures out what kind of project I'm working on.  They figure out a web site where my claude code will likely search for resources for my project.  Maybe it's some kind of online community.  They make a post that effectively turns into an injected prompt for my claude code.  I don't care if this causes my claude code to dump everything it has access to in the subtree or run arbitrary programs inside the container.  I can accept even a fork bomb that crashes the laptop.  But I don't want to allow permanent damage to the laptop outside the container, and I don't want a program running in the container to exfiltrate files from outside.
+
+My work flow will be for the subtree to be a git repository that claude code will treat as strictly local.  I'll run meld outside the container to code review changes, and I'll run git push myself from outside the container.
+
+To clarify network access: yes to full outbound; no to inbound; no to local services (localhost:3000)
+
+I think the only credential needed is the anthropic API key.
+
+I haven't used docker a lot, and I don't know how to choose between persistent volume and ephemeral sandbox.
+
+Thank you for the comments about containing damage - I'm aligned with you on that.
+
+===
+
+I want to use the claude CLI (I use emacs and will never learn vs code).
+
+I do want an interactive shell in the container.  I imagine claude and I will collaborate there for some parts of the projects, and then I'll do the careful review when I need to run something that needs more access to external resources.
+
+persistent volume + ephemeral container sounds good
+
+Using an environment variable for the api key sounds good.  You are currently running in a pretty default configuration on my laptop, so the launch script should pick up the key from the default place.
+
+===
+
+Here's more info on what I want to do: Mostly Python and embedded C projects, plus a little php.  My main laptop runs Pop!_OS 22.04 LTS.  I also use computers with various recent ubuntu's.
+
+So let's use debian as the base image.  I agree with npm install
+
+You mention the idea of having the launch script notice a .git directory and setting up for a particular project - that sounds good to me.  For now, I think the idea of separate claude threads for separate projects sounds fine.  I'm ok with the launch script building the Dockerfile dynamically after it knows the directory, if that's necessary.
+
+I'm going to name this infrastructure project "aisand".  That's the name of the directory you're currently running in, and I'll push it to a public github repository with that name when it's done.  Let's call the launch script "aisand" and the usage will be to run it with the current directory being the root of a repository.
+
+===
+
+Looks real good.  Let's refine README.md first and let the other files dangle until it is settled.
+
+In "What we protect against", you say "Arbitrary command execution inside the container" - but I think we've covered what we need to allow arbitrary commands (for example pytests).
+
+Let's duplicate the directory structure inside the container.  If the project name is in "/home/pace/apply" on the host, give it the same name in the container, instead of /work (and /home/pace will be otherwise empty in the container)
+
+We can make the launch script aisand have the x bit set in the repository, so the README doesn't need to mention chmod
+
+A common usage pattern might be to develop a pytest.  In one window I'll run aisand and claude, and in another, just aisand.  Then either claude or I can run the pytest in the restricted environment.
+
+Let's package those docker commands with "aisand rebuild" and "aisand prune"
+
+Remove the php mentions ... I won't actually run php in the container for that project ... I'll just be generating php to run on the host, so there's no extra infrastructure needed.
+
+My github account is github.com/pacew
+
+I just remembered about MEMORY.md and other claude state storage.  Should we make a standardized place in the project repository for these files?
+
+===
+
+It seems like mounting the host ~/.claude opens an attack vector.  My intuition is to add a .claude-memory to each project's repository.  Recognizing that many of my projects will get pushed to my public github, what kinds of sensitive data might wind up there?
+
+===
+
+Now that I think about it, I don't want to commit .claude-memory to the project repositories.  My main work pattern is use a single personal laptop for personal projects and a single work laptop for work projects.  For now, if I want to work on a project on a different host, I can manually copy .claude-memory to it (and if that becomes common, make a script).
+
+Instead of leaving half thought out ideas about version controlled memory in the readme, just take that stuff out for now.
+
+The aisand project itself doesn't need special memory handling.  I'll never run it in a container, and I'll manually review any commands claude wants to run in it (mainly just file editing).  It can use the default ~/.claude memory.
+
+===
+
+I have a feeling that the automatic claude memory management is probably already good and going to get better, so I want to support it smoothly, even if it means the launch command needs to set up a volume for it.
+
+===
+
+I'm having problems getting emacs to behave well with markdown and visual-line.  I don't want to chase that now, and will live without markdown preview.  I've added -*- mode: visual-line -*- to the top of README.md ... please preserve that.
+
+There are a few stray mentions of /work still in the readme file and Dockerfile talks about /work
+
+Other than that, it's looking very good and about ready to test
+
+===
+
+Is there a benefit to creating a user "claude" inside the container?  Would there be a drawback to using $USER ?
