@@ -127,7 +127,7 @@ I've done "git init" in the aisand directory and committed an earlier version of
 
 ===
 
-Success.  I ran "aisand" in the directory /home/pace/apply (and old PHP web application), and I ran claude within that.  So far so good.  Here are some things to fix to smooth the startup:
+Success.  I ran "aisand" in the directory /home/pace/apply (and old PHP web application), and I ran claude within that.  So far so good.  Here are some things to fix to smooth the startup (which we'll implement after we do some more testing):
 
 pre-answer the initial questions:
 
@@ -136,8 +136,128 @@ use the api key?"
 security notes
 trust in this folder
 
+I've pushed aisand to https://github.com/pacew/aisand
 
+I'm open to suggestions, but I imagine a good next step would be for you to write a prompt that I can paste into the claude session running in the apply sandbox to tell it to read https://github.com/pacew/aisand to understand that it is being used to test this setup.  Tell it to do a test sequence like:
 
-I'm creating a utility, "aisand", that runs the claude cli in a docker sandbox.  This session is for testing that docker is configured right.  Please read about aisand at https://github.com/pacew/aisand and then evaluate whether you have the access you need if we 
+create a branch aisand-test
+create and run a small shell script
+commit it to the repository
+write some stuff to the memory in .claude
 
-You're running in a container and have access to /home/pace/apply, and old PHP web application.  You should be able to edit files and run test programs in this directory, and you should be able to access the external network.  /home/pace/.claude is a separate
+===
+
+The test was very successful.  The main problem is we need to create .gitconfig with my name and email so git commit can work.  Also, I'd like to pre-answer claude CLI's questions about theme and confirming that it's running in a trusted directorry.  Also, pre-answer yes to questions like:
+
+Allow reading from ~/.claude
+Allow fetch from github.com
+allow git checkout and mkdir
+allow all edits for this session
+allow commands similar to chmod and ./hello.sh
+allow git add and commit
+preload .gitconfig with my name and email
+allow git config
+
+I verified that the branch was created and committed and that the SB shell prompt worked.  Here is the report claude produced:
+
+● Summary
+
+  Worked:
+  - Network: fetched the aisand README from GitHub via WebFetch.
+  - File write: created aisand-test/hello.sh in the project directory.
+  - Shell execution: script ran and printed env info (date
+  2026-05-28T12:24:09+00:00, hostname aisand-apply, uid 1000).
+  - Git operations: git checkout -b aisand-test, git add, git commit (commit
+  961e230) all succeeded.
+  - Memory write: created
+  ~/.claude/projects/-home-pace-apply/memory/aisand-environment.md and
+  MEMORY.md.
+  
+  Didn't work / needed setup:
+  - Git identity is not configured anywhere in the sandbox — git commit failed
+  with "Author identity unknown" until I set a repo-local user.name/user.email
+  (per your "placeholder identity" choice: aisand-test <aisand@localhost>).
+  Worth pre-seeding in the container if you commit regularly.
+
+  Couldn't visually confirm:
+  - The red SB marker in the shell prompt — I can't see my own terminal prompt;
+  only hostname=aisand-apply and uid/gid 1000 indirectly confirm containment.
+
+  Surprising:
+  - The project's git status already had three untracked files (STATUS,
+  current.sql, n.php) on the parent pace branch — left untouched as instructed.
+  - The placeholder git identity is scoped to this repo only (.git/config), but
+  .git/config lives in the bind-mounted project dir, so it will persist back to
+  the host. You may want to git config --unset user.email / user.name before 
+  pushing if that's unwanted.
+  
+  Branch aisand-test is ready for you to review with meld/git diff from outside
+  the container.
+
+✻ Cogitated for 1m 30s
+
+※ recap: Goal was to validate the aisand sandbox by running a self-contained 
+  test on branch aisand-test. The script committed cleanly as 961e230; next 
+  action is for you to review the branch with meld/git diff outside the 
+  container. (disable recaps in /config)
+
+===
+
+I reviewed your changes and they look good.  Let's run another test before committing.
+
+I removed the untracked (and unimportant) files in the apply directory to avoid confusion.
+
+I'm not very familar with claude memory.  The claude instance in the sandbox is still running.  I'd like it to remember what we've done so far after I close it, rebuild the container, and start a fresh session.  Is there something I need to do to tell it to write out state before I close the current session?
+
+Then, please write a prompt with specific instructions for what the the new sandbox claude should test (including verifying that the memory was intact).
+
+===
+
+Looks good.  The startup was smooth and did not ask any environment questions.  I had to approve the first of each command type, but that's not too obtrusive - we can work on pre-approval in a future session.  It was surprised that the placeholder identity was gone ... I removed that myself, so no worries.
+
+I think that's everything needed for baseline funcionality.  If you don't see anything else that should be fixed before committing the current changes to aisand, please go ahead and do that, writing the commit message specifically for a future you.
+
+Here is the sandbox claude test report:
+
+All checks done. Report:
+
+  Memory recalled (5 entries): aisand sandbox uses /home/pace/apply (a real PHP
+  app) as a test bed, only aisand-test* branches are safe to touch, the first
+  test on commit 961e230 left two rough edges that the rebuilt container was
+  supposed to fix (host ~/.gitconfig mount and pre-seeded ~/.claude.json), and
+  the aisand source lives at /home/pace/aisand / github.com/pacew/aisand.
+
+  First-run prompts: None. ~/.claude.json is pre-seeded (~22 KB) with
+  numStartups, approved API key, and cached features.
+
+  Git identity: Works from host gitconfig. ~/.gitconfig is mounted read-only
+  with Pace Willisson <pace@alum.mit.edu>. No per-repo [user] override in
+  .git/config. Commit 0774b9b on aisand-test2 is authored Pace Willisson 
+  <pace@alum.mit.edu> — fix verified.
+
+  Surprises:
+  - The placeholder aisand-test <aisand@localhost> that the previous test wrote
+  into /home/pace/apply/.git/config is no longer there — current local config
+  has no [user] section. Either you cleaned it up between sessions, or it never
+  persisted. Either way, clean state.
+  - Memory volume survived the container rebuild intact — all 5 prior memory
+  files were present and readable.
+  
+  Memory updated: aisand-environment.md now reflects the verified-working state;
+   aisand-next-verification.md flipped from "pending" to "confirmed."
+
+✻ Worked for 50s
+
+※ recap: Goal: verify aisand sandbox fixes after container rebuild. Both fixes 
+  confirmed working — host gitconfig mount and pre-seeded ~/.claude.json — with 
+  a clean commit on branch aisand-test2 authored as the real host identity. 
+  Next: you review the branch with meld from the host. (disable recaps in 
+  /config)
+
+===
+
+I pushed to github and I'll try this out on a real project when I next get a chance to work on personal projects.  Please write out your memories of this work (to the host ~/.claude).  As I said, I'm new to memories.  Is there a standard initial prompt I should give you (whether running in the host aisand directory or a sandboxed project) to find relevant memories?
+
+===
+
+A final bit of work this morning.  Let's split most of README.md off into a .md file with implementation details, and have the readme be a short file that describes the aspirations of the project with some example usage and a link to the details.  The audience of the readme is someone who has maybe a year of experience with programming python after their undergraduate degree and who hasn't thought much about security beyond what was taught in their courses.
