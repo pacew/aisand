@@ -116,6 +116,14 @@ When you exit the container (Ctrl+D or `exit`), it's destroyed. Your project fil
 
 **Note:** Don't run `claude update` inside the container — Claude Code is installed system-wide and the non-root container user can't update it. Use `aisand rebuild` instead.
 
+### First-run smoothing
+
+The launch script pre-seeds Claude Code's `~/.claude.json` each run so the onboarding dialog, theme, trust prompt, and API-key approval are all skipped. The API-key approval list is copied from the host's `~/.claude.json` (if present), so the same API key used on the host won't be re-prompted in the container.
+
+The host's `~/.gitconfig` is mounted read-only into the container (if present) so `git commit` works with your real name and email without configuring anything inside.
+
+Pre-allowing tool permissions (so Claude Code doesn't prompt for each Bash command, file edit, or fetch) is a TODO — the schema isn't documented well enough to encode reliably. For now, grant interactively with "always allow" and the choices will persist in the memory volume.
+
 ### Multi-window workflow
 
 A common pattern: run Claude in one terminal, and use other terminals in the same container for running tests or commands:
@@ -228,3 +236,4 @@ Next run will create a fresh memory volume.
 - **Memory volume:** Named volume `aisand-{repo-name-safe}-{path-hash}-memory` mounted at `$HOME/.claude`. The path hash prevents collisions between same-named repos in different locations.
 - **Home tmpfs:** `$HOME` is a tmpfs so tools that write to `~/.gitconfig`, `~/.cache`, etc. work without polluting the host.
 - **Subcommands:** `aisand rebuild` (delete image, rebuild, launch) and `aisand prune` (remove all aisand images and volumes).
+- **Entrypoint:** `aisand-entrypoint` is a tiny script baked into the image. It writes `~/.claude.json` from the `AISAND_CLAUDE_CONFIG` env var (set by the launch script) before exec'ing the requested command. This is how first-run dialogs get pre-answered every session.

@@ -1,2 +1,24 @@
 don't clobber memory volumes with aisand prune
 
+pre-allow common tool permissions so Claude Code doesn't prompt for
+each operation inside the sandbox. Research needed:
+  - Exact schema for ~/.claude/settings.json permissions.allow
+  - Valid patterns for Bash subcommands (Bash(git:*), Bash(./*.sh)?)
+  - Whether Edit/Write/Read take patterns or are global
+  - Whether WebFetch(domain:github.com) is the correct pattern
+  - Per-project vs user-wide vs session scope
+Goal: pre-allow read/edit/write in the project tree, common shell
+commands (git, mkdir, chmod, ./scripts), and WebFetch to common docs
+sites — since the sandbox itself is the trust boundary.
+
+investigate whether claude update can be made to work for the
+non-root container user (e.g., installing claude into $HOME instead
+of system-wide). Currently users must aisand rebuild.
+
+consider whether to mount more of the host's claude config than just
+the API key approval list — e.g., model preferences, custom commands.
+
+handle host with no ~/.gitconfig: warn the user that git commit will
+fail until they configure one (on the host or inside the container).
+
+can the claude code prompt itself be modified to show when it is in the sandbox?

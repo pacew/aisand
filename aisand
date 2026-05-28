@@ -7,7 +7,7 @@ if [ -f /.dockerenv ]; then
   exit 1
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 DOCKERFILE="$SCRIPT_DIR/Dockerfile"
 
 if [ ! -f "$DOCKERFILE" ]; then
@@ -99,6 +99,48 @@ root:x:0:
 ${USER}:x:$(id -g):
 EOF
 
+# Pre-seed Claude Code config so the first-run dialogs (onboarding, trust,
+# theme, API-key approval) are answered without prompting. Re-seeded each
+# run because ~/.claude.json lives in tmpfs $HOME.
+#
+# We copy the API-key approval list from the host's ~/.claude.json if
+# present, so the same API key isn't re-prompted in the container.
+API_KEY_APPROVALS='[]'
+if [ -f "$HOME/.claude.json" ] && command -v python3 >/dev/null 2>&1; then
+  API_KEY_APPROVALS=$(python3 - "$HOME/.claude.json" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as f:
+        d = json.load(f)
+    print(json.dumps(d.get('customApiKeyResponses', {}).get('approved', [])))
+except Exception:
+    print('[]')
+PY
+)
+fi
+
+CLAUDE_CONFIG=$(cat <<EOF
+{
+  "hasCompletedOnboarding": true,
+  "theme": "dark",
+  "customApiKeyResponses": {"approved": ${API_KEY_APPROVALS}, "rejected": []},
+  "projects": {
+    "${REPO_ROOT}": {
+      "hasTrustDialogAccepted": true,
+      "projectOnboardingSeenCount": 1
+    }
+  }
+}
+EOF
+)
+
+# Optional mount of host ~/.gitconfig so git commits get the host user's
+# name and email. Read-only so the container can't modify it.
+GITCONFIG_MOUNT=()
+if [ -f "$HOME/.gitconfig" ]; then
+  GITCONFIG_MOUNT=(-v "$HOME/.gitconfig:$HOME/.gitconfig:ro")
+fi
+
 echo ""
 echo "Launching interactive shell..."
 echo "Project: $REPO_ROOT"
@@ -117,10 +159,12 @@ docker run --rm -it \
   -e HOME="$HOME" \
   -e USER="$USER" \
   -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  -e AISAND_CLAUDE_CONFIG="$CLAUDE_CONFIG" \
   -v "$PASSWD_FILE:/etc/passwd:ro" \
   -v "$GROUP_FILE:/etc/group:ro" \
   -v "$REPO_ROOT:$REPO_ROOT" \
   -v "$MEMORY_VOLUME:$HOME/.claude" \
+  "${GITCONFIG_MOUNT[@]}" \
   "$IMAGE_TAG"
 
 echo ""

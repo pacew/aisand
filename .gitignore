@@ -9,3 +9,6 @@
 
 # Docker build artifacts (if any)
 .docker/
+
+# Claude Code session state
+.claude/

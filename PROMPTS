@@ -121,4 +121,23 @@ Regarding starting in /home/claude ... what is the point of the claude user in t
 
 It does look like one image will be fine for the current usage plan.  aisand can evolve as I use it.
 
+===
 
+I've done "git init" in the aisand directory and committed an earlier version of the files.  Please commit the current files and write a commit message that will be helpful to future AIs who work on this project.  Then, I'll make the first test running in an ordinary host terminal.
+
+===
+
+Success.  I ran "aisand" in the directory /home/pace/apply (and old PHP web application), and I ran claude within that.  So far so good.  Here are some things to fix to smooth the startup:
+
+pre-answer the initial questions:
+
+Choose the text style
+use the api key?"
+security notes
+trust in this folder
+
+
+
+I'm creating a utility, "aisand", that runs the claude cli in a docker sandbox.  This session is for testing that docker is configured right.  Please read about aisand at https://github.com/pacew/aisand and then evaluate whether you have the access you need if we 
+
+You're running in a container and have access to /home/pace/apply, and old PHP web application.  You should be able to edit files and run test programs in this directory, and you should be able to access the external network.  /home/pace/.claude is a separate

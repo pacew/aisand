@@ -1,0 +1,11 @@
+#!/bin/bash
+# aisand container entrypoint.
+# Seeds Claude Code's ~/.claude.json from an env var so the first-run
+# prompts (onboarding, trust, theme, API-key approval) are pre-answered.
+# ~/.claude.json lives in tmpfs $HOME, so it must be re-seeded each run.
+
+if [ -n "$AISAND_CLAUDE_CONFIG" ]; then
+  printf '%s' "$AISAND_CLAUDE_CONFIG" > "$HOME/.claude.json"
+fi
+
+exec "$@"
