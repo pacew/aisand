@@ -22,3 +22,19 @@ handle host with no ~/.gitconfig: warn the user that git commit will
 fail until they configure one (on the host or inside the container).
 
 can the claude code prompt itself be modified to show when it is in the sandbox?
+
+aisand.json extra_packages is apt-only, so there is no first-class path
+for pip-only or newer-than-Debian Python deps (bookworm gives numpy
+1.24.2, matplotlib 3.6.3, scipy 1.10.1 — no numpy 2.x). Two dead ends
+worth remembering: system pip is blocked by PEP 668
+(/usr/lib/python3.11/EXTERNALLY-MANAGED), and pip install --user does
+not survive a run because $HOME is tmpfs. Only a venv inside the repo
+persists, since the repo is bind-mounted rw — but that puts build
+artifacts in the source tree and costs a rebuild on every fresh
+container.
+Idea: a pip_packages key that builds a venv into the derived image
+(e.g. /opt/venv, created at image build time, on PATH via ENV), so the
+install cost is paid once per package-set change like extra_packages
+already is. Do NOT reach for --break-system-packages.
+Open question: whether pip_packages and extra_packages should share
+one hash label or get separate ones.
