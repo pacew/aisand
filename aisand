@@ -28,10 +28,9 @@ if [ "$1" == "prune" ]; then
   exit 0
 fi
 
+REBUILD=0
 if [ "$1" == "rebuild" ]; then
-  echo "Deleting old image: $IMAGE_TAG"
-  docker image rm "$IMAGE_TAG" 2>/dev/null || true
-  # Fall through to normal build and launch
+  REBUILD=1
 fi
 
 # Allow .git to be either a directory (normal clone) or a file (worktree)
@@ -55,19 +54,74 @@ REPO_NAME_SAFE="$(echo -n "$REPO_NAME" | tr -c 'a-zA-Z0-9._-' '_')"
 PATH_HASH="$(echo -n "$REPO_ROOT" | sha256sum | cut -c1-8)"
 MEMORY_VOLUME="aisand-${REPO_NAME_SAFE}-${PATH_HASH}-memory"
 
+# Optional per-project config: $REPO_ROOT/aisand.json
+#   extra_packages : list of apt packages installed into a derivative image
+#   html_port      : int, forwarded as -p N:N (host → container, same port)
+#   ssl_port       : int, ditto
+EXTRA_PACKAGES=""
+HTML_PORT=""
+SSL_PORT=""
+if [ -f "$REPO_ROOT/aisand.json" ]; then
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "Error: aisand.json present but jq not found on host"
+    exit 1
+  fi
+  EXTRA_PACKAGES="$(jq -r '(.extra_packages // []) | join(" ")' "$REPO_ROOT/aisand.json")"
+  HTML_PORT="$(jq -r '.html_port // empty' "$REPO_ROOT/aisand.json")"
+  SSL_PORT="$(jq -r '.ssl_port  // empty' "$REPO_ROOT/aisand.json")"
+fi
+
+# If extra_packages is set, layer them onto the base image in a per-project
+# derivative image. The base image stays shared; only the layer differs.
+DERIVED_IMAGE=""
+if [ -n "$EXTRA_PACKAGES" ]; then
+  DERIVED_IMAGE="aisand-${REPO_NAME_SAFE}-${PATH_HASH}"
+fi
+IMAGE_TO_USE="${DERIVED_IMAGE:-$IMAGE_TAG}"
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "aisand: Claude Code Sandbox"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "Repository:    $REPO_ROOT"
-echo "Image:         $IMAGE_TAG"
+echo "Image:         $IMAGE_TO_USE"
 echo "Memory volume: $MEMORY_VOLUME"
+[ -n "$EXTRA_PACKAGES" ] && echo "Extra pkgs:    $EXTRA_PACKAGES"
+[ -n "$HTML_PORT" ] && echo "HTML port:     $HTML_PORT (host → container)"
+[ -n "$SSL_PORT" ]  && echo "SSL port:      $SSL_PORT (host → container)"
 echo ""
 
+if [ "$REBUILD" -eq 1 ]; then
+  echo "Removing base image: $IMAGE_TAG"
+  docker image rm "$IMAGE_TAG" 2>/dev/null || true
+  if [ -n "$DERIVED_IMAGE" ]; then
+    echo "Removing derived image: $DERIVED_IMAGE"
+    docker image rm "$DERIVED_IMAGE" 2>/dev/null || true
+  fi
+fi
+
 if ! docker image inspect "$IMAGE_TAG" > /dev/null 2>&1; then
-  echo "Building Docker image (first run, this takes a minute)..."
+  echo "Building base Docker image (this takes a minute)..."
   docker build -f "$DOCKERFILE" -t "$IMAGE_TAG" "$SCRIPT_DIR"
 else
-  echo "Using cached Docker image"
+  echo "Using cached base image"
+fi
+
+if [ -n "$DERIVED_IMAGE" ]; then
+  EXTRA_HASH="$(echo -n "$EXTRA_PACKAGES" | sha256sum | cut -c1-12)"
+  EXISTING_HASH="$(docker image inspect -f '{{ index .Config.Labels "aisand.extra_packages_hash" }}' "$DERIVED_IMAGE" 2>/dev/null || true)"
+  if [ "$EXISTING_HASH" != "$EXTRA_HASH" ]; then
+    echo "Building derived image with extra packages: $EXTRA_PACKAGES"
+    docker build -t "$DERIVED_IMAGE" \
+      --label "aisand.extra_packages_hash=$EXTRA_HASH" \
+      - <<EOF
+FROM $IMAGE_TAG
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    $EXTRA_PACKAGES \\
+    && rm -rf /var/lib/apt/lists/*
+EOF
+  else
+    echo "Using cached derived image"
+  fi
 fi
 
 # Create the memory volume if needed, and chown it to the host user so
@@ -141,7 +195,23 @@ if [ -f "$HOME/.gitconfig" ]; then
   GITCONFIG_MOUNT=(-v "$HOME/.gitconfig:$HOME/.gitconfig:ro")
 fi
 
-echo ""
+# Host→container port forwarding for apache or similar. Same port number on
+# both sides keeps URLs symmetric (localhost:9999 on host == 9999 in apache
+# config inside the container). Docker binds 0.0.0.0 by default, so external
+# DNS (e.g. k.pacew.org:9999) reaches the container too.
+PORT_FLAGS=()
+[ -n "$HTML_PORT" ] && PORT_FLAGS+=(-p "${HTML_PORT}:${HTML_PORT}")
+[ -n "$SSL_PORT" ]  && PORT_FLAGS+=(-p "${SSL_PORT}:${SSL_PORT}")
+
+# Read-only mount of host apache certs at the same path inside the container,
+# so apache config can reference /etc/apache2/foo.crt as-is.
+SSL_CERT_MOUNTS=()
+shopt -s nullglob
+for f in /etc/apache2/*.crt /etc/apache2/*.key /etc/apache2/*.chain.pem; do
+  SSL_CERT_MOUNTS+=(-v "$f:$f:ro")
+done
+shopt -u nullglob
+
 echo "Launching interactive shell..."
 echo "Project: $REPO_ROOT"
 echo "Exit with Ctrl+D or 'exit' to destroy the container"
@@ -165,7 +235,9 @@ docker run --rm -it \
   -v "$REPO_ROOT:$REPO_ROOT" \
   -v "$MEMORY_VOLUME:$HOME/.claude" \
   "${GITCONFIG_MOUNT[@]}" \
-  "$IMAGE_TAG"
+  "${PORT_FLAGS[@]}" \
+  "${SSL_CERT_MOUNTS[@]}" \
+  "$IMAGE_TO_USE"
 
 echo ""
 echo "Container destroyed. Project files and memory remain on disk."

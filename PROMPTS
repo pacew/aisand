@@ -261,3 +261,8 @@ I pushed to github and I'll try this out on a real project when I next get a cha
 ===
 
 A final bit of work this morning.  Let's split most of README.md off into a .md file with implementation details, and have the readme be a short file that describes the aspirations of the project with some example usage and a link to the details.  The audience of the readme is someone who has maybe a year of experience with programming python after their undergraduate degree and who hasn't thought much about security beyond what was taught in their courses.
+
+===
+
+resume with
+claude --resume 3c3ed6d1-3b80-4a83-a627-ba5119cdf440
