@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     less \
     ca-certificates \
+    gnuplot-nox \
     nodejs \
     npm \
     && rm -rf /var/lib/apt/lists/*
