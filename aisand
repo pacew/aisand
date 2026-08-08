@@ -18,8 +18,14 @@ fi
 # A single image is shared across all aisand projects.
 IMAGE_TAG="aisand"
 
+# User-level config, XDG Base Directory spec. Holds the same keys as a
+# project's ./aisand.json, so anything added there later works here too;
+# for now only extra_packages is meaningful at this level.
+USER_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/aisand"
+USER_CONFIG="$USER_CONFIG_DIR/config.json"
+
 usage() {
-  cat <<'EOF'
+  cat <<EOF
 Usage: cd /path/to/git/repo && aisand [claude-options...]
                         run Claude Code in the sandbox (permissions bypassed;
                         the container is the trust boundary)
@@ -27,8 +33,41 @@ Usage: cd /path/to/git/repo && aisand [claude-options...]
                         run an interactive shell in the sandbox
        aisand rebuild [claude-options...]
                         delete and rebuild the Docker image, then run Claude Code
+       aisand add PKG...
+                        add apt packages wanted in every project
+       aisand delete PKG...
+                        remove apt packages from the every-project list
+       aisand list      show the config files and the resulting package list
        aisand prune     remove all aisand images and volumes
+
+Every-project packages live in $USER_CONFIG
+Per-project packages and ports live in ./aisand.json
 EOF
+}
+
+need_jq() {
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "Error: jq not found on host (needed to read aisand config files)"
+    exit 1
+  fi
+}
+
+# Rewrite $USER_CONFIG by piping it through a jq filter. Any positional
+# arguments become $ARGS.positional inside the filter.
+edit_user_config() {
+  local filter="$1"; shift
+  need_jq
+  mkdir -p "$USER_CONFIG_DIR"
+  [ -f "$USER_CONFIG" ] || echo '{}' > "$USER_CONFIG"
+  local tmp
+  tmp="$(mktemp)"
+  jq "$filter" --args "$@" < "$USER_CONFIG" > "$tmp"
+  mv "$tmp" "$USER_CONFIG"
+}
+
+show_packages() {
+  local file="$1"
+  jq -r '(.extra_packages // []) | if length == 0 then "  (none)" else map("  " + .) | .[] end' "$file"
 }
 
 # Argument dispatch. Anything that isn't a recognized subcommand is either a
@@ -52,6 +91,36 @@ case "${1-}" in
     REBUILD=1
     shift
     CONTAINER_CMD=(claude --dangerously-skip-permissions "$@")
+    ;;
+  add)
+    shift
+    [ $# -eq 0 ] && { usage; exit 1; }
+    edit_user_config '.extra_packages = ((.extra_packages // []) + $ARGS.positional | unique)' "$@"
+    echo "$USER_CONFIG"
+    show_packages "$USER_CONFIG"
+    exit 0
+    ;;
+  delete)
+    shift
+    [ $# -eq 0 ] && { usage; exit 1; }
+    edit_user_config '.extra_packages = ((.extra_packages // []) - $ARGS.positional)' "$@"
+    echo "$USER_CONFIG"
+    show_packages "$USER_CONFIG"
+    exit 0
+    ;;
+  list)
+    need_jq
+    echo "$USER_CONFIG"
+    if [ -f "$USER_CONFIG" ]; then
+      show_packages "$USER_CONFIG"
+    else
+      echo "  (no such file)"
+    fi
+    if [ -f ./aisand.json ]; then
+      echo "$(pwd)/aisand.json"
+      show_packages ./aisand.json
+    fi
+    exit 0
     ;;
   prune)
     echo "Removing all aisand images and volumes..."
@@ -87,28 +156,46 @@ REPO_NAME_SAFE="$(echo -n "$REPO_NAME" | tr -c 'a-zA-Z0-9._-' '_')"
 PATH_HASH="$(echo -n "$REPO_ROOT" | sha256sum | cut -c1-8)"
 MEMORY_VOLUME="aisand-${REPO_NAME_SAFE}-${PATH_HASH}-memory"
 
-# Optional per-project config: $REPO_ROOT/aisand.json
-#   extra_packages : list of apt packages installed into a derivative image
-#   html_port      : int, forwarded as -p N:N (host → container, same port)
-#   ssl_port       : int, ditto
+PROJECT_CONFIG="$REPO_ROOT/aisand.json"
+
+# Two optional config layers, both in the same JSON format:
+#
+#   $USER_CONFIG            (managed by aisand add/delete/list)
+#     extra_packages : apt packages wanted in every project
+#   $PROJECT_CONFIG         (./aisand.json, hand-edited, may be committed)
+#     extra_packages : apt packages wanted only in this project
+#     html_port      : int, forwarded as -p N:N (host → container, same port)
+#     ssl_port       : int, ditto
+#
+# The two extra_packages lists are unioned into one derivative image. Ports are
+# project-only; they describe a specific application, not a user preference.
 EXTRA_PACKAGES=""
 HTML_PORT=""
 SSL_PORT=""
-if [ -f "$REPO_ROOT/aisand.json" ]; then
-  if ! command -v jq >/dev/null 2>&1; then
-    echo "Error: aisand.json present but jq not found on host"
-    exit 1
-  fi
-  EXTRA_PACKAGES="$(jq -r '(.extra_packages // []) | join(" ")' "$REPO_ROOT/aisand.json")"
-  HTML_PORT="$(jq -r '.html_port // empty' "$REPO_ROOT/aisand.json")"
-  SSL_PORT="$(jq -r '.ssl_port  // empty' "$REPO_ROOT/aisand.json")"
+
+CONFIG_FILES=()
+[ -f "$USER_CONFIG" ] && CONFIG_FILES+=("$USER_CONFIG")
+[ -f "$PROJECT_CONFIG" ] && CONFIG_FILES+=("$PROJECT_CONFIG")
+
+if [ ${#CONFIG_FILES[@]} -gt 0 ]; then
+  need_jq
+  EXTRA_PACKAGES="$(jq -rs 'map(.extra_packages // []) | add | unique | join(" ")' "${CONFIG_FILES[@]}")"
 fi
 
-# If extra_packages is set, layer them onto the base image in a per-project
-# derivative image. The base image stays shared; only the layer differs.
+if [ -f "$PROJECT_CONFIG" ]; then
+  HTML_PORT="$(jq -r '.html_port // empty' "$PROJECT_CONFIG")"
+  SSL_PORT="$(jq -r '.ssl_port  // empty' "$PROJECT_CONFIG")"
+fi
+
+# If extra_packages is non-empty, layer them onto the shared base image in a
+# derivative image tagged by a hash of the package set itself. Every project
+# asking for the same packages therefore shares one image, and editing either
+# config file names a different tag — so the tag *is* the cache key and there
+# is nothing to invalidate. jq's `unique` has already sorted and deduped the
+# list, so the hash does not depend on the order the packages were added in.
 DERIVED_IMAGE=""
 if [ -n "$EXTRA_PACKAGES" ]; then
-  DERIVED_IMAGE="aisand-${REPO_NAME_SAFE}-${PATH_HASH}"
+  DERIVED_IMAGE="aisand-pkgs-$(echo -n "$EXTRA_PACKAGES" | sha256sum | cut -c1-12)"
 fi
 IMAGE_TO_USE="${DERIVED_IMAGE:-$IMAGE_TAG}"
 
@@ -139,21 +226,22 @@ else
   echo "Using cached base image"
 fi
 
+# The tag encodes the package set, so mere existence means it is current. The
+# label records the human-readable list, so `docker image inspect` (or
+# `docker images --filter label=...`) can say what a hashed tag contains.
 if [ -n "$DERIVED_IMAGE" ]; then
-  EXTRA_HASH="$(echo -n "$EXTRA_PACKAGES" | sha256sum | cut -c1-12)"
-  EXISTING_HASH="$(docker image inspect -f '{{ index .Config.Labels "aisand.extra_packages_hash" }}' "$DERIVED_IMAGE" 2>/dev/null || true)"
-  if [ "$EXISTING_HASH" != "$EXTRA_HASH" ]; then
+  if docker image inspect "$DERIVED_IMAGE" > /dev/null 2>&1; then
+    echo "Using cached derived image"
+  else
     echo "Building derived image with extra packages: $EXTRA_PACKAGES"
     docker build -t "$DERIVED_IMAGE" \
-      --label "aisand.extra_packages_hash=$EXTRA_HASH" \
+      --label "aisand.extra_packages=$EXTRA_PACKAGES" \
       - <<EOF
 FROM $IMAGE_TAG
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     $EXTRA_PACKAGES \\
     && rm -rf /var/lib/apt/lists/*
 EOF
-  else
-    echo "Using cached derived image"
   fi
 fi
 

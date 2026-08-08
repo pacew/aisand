@@ -61,9 +61,41 @@ Anything that touches credentials or external systems — `git push`, deploying,
 
 `aisand shell` in a second terminal on the same project shares the project mount and memory volume, so you can have Claude in one terminal and `pytest` (or a build, or a shell) in another.
 
+## Extra packages
+
+The base image is deliberately small. Packages you want everywhere go in your
+user config:
+
+```bash
+aisand add texlive-latex-base python3-numpy
+aisand list
+aisand delete python3-numpy
+```
+
+These live in `~/.config/aisand/config.json` (or `$XDG_CONFIG_HOME/aisand/config.json`).
+Each command prints the file's full path so you can edit it by hand.
+
+Packages needed by one project only go in that project's `./aisand.json`, which
+uses the same format and can also declare ports:
+
+```json
+{
+  "extra_packages": ["ghostscript"],
+  "html_port": 9999,
+  "ssl_port": 9443
+}
+```
+
+Both `extra_packages` lists are unioned and installed into a derivative image
+layered on the shared base, tagged `aisand-pkgs-<hash of the package list>`.
+Projects wanting the same packages share one image; changing either list builds a
+new one on the next launch. Everything is `apt` only — see the note in
+[TODO](TODO) about pip.
+
 ## Subcommands
 
-- `aisand shell` / `sh` / `bash` — interactive shell in the sandbox instead of Claude Code.
+- `aisand shell` / `sh` / `bash` — interactive shell in the sandbox instead of Claude Code. Arguments are passed to bash.
+- `aisand add PKG...` / `aisand delete PKG...` / `aisand list` — manage the every-project package list.
 - `aisand rebuild` — rebuild the Docker image, then launch Claude Code. Use after editing the Dockerfile or to pick up updates to the base image.
 - `aisand prune` — remove all aisand images and memory volumes. Destructive; you lose Claude's memory for every project.
 

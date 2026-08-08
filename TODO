@@ -1,8 +1,30 @@
 don't clobber memory volumes with aisand prune
 
+editing a package list orphans the old aisand-pkgs-<hash> image rather
+than overwriting a per-project tag, so unused ones accumulate until
+prune. Cheap on disk (layers are shared) but untidy. Options: reap
+aisand-pkgs-* images not referenced by any current config at launch
+(racy — another project may be starting with that image), or a
+dedicated "aisand gc" that removes them without touching volumes.
+Probably wants the memory-volume fix above first.
+
 DONE (2026-08-08): pre-allowing tool permissions is moot — aisand now
 passes --dangerously-skip-permissions unconditionally, since the
 container is the trust boundary. No settings.json allow-list needed.
+
+drop nodejs and npm from the runtime image via a multi-stage build.
+They are build-time only: the @anthropic-ai/claude-code npm package
+ships bin/claude.exe, a native ELF binary (~263 MB) that links only
+against libc/libm/libpthread/librt/libdl and runs with node off PATH
+(verified against image aisand, claude 2.1.220). A builder stage with
+nodejs+npm can npm install -g, and the final stage COPY --from just
+the binary to /usr/local/bin/claude. Saves ~195 MB: /usr/share/nodejs
+144M, libnode.so.108 46M, nodejs 4M, npm 3M. Needs a full rebuild and
+a real interactive session to confirm nothing shells out to node
+(e.g. npx-launched MCP servers would break, but aisand uses none).
+Note bin/claude.exe is hardlinked to
+node_modules/@anthropic-ai/claude-code-linux-x64/claude, so du
+double-counts the package at 520M when it is really ~263M.
 
 investigate whether claude update can be made to work for the
 non-root container user (e.g., installing claude into $HOME instead
@@ -16,7 +38,8 @@ fail until they configure one (on the host or inside the container).
 
 can the claude code prompt itself be modified to show when it is in the sandbox?
 
-aisand.json extra_packages is apt-only, so there is no first-class path
+extra_packages (both in ~/.config/aisand/config.json and in a project's
+aisand.json) is apt-only, so there is no first-class path
 for pip-only or newer-than-Debian Python deps (bookworm gives numpy
 1.24.2, matplotlib 3.6.3, scipy 1.10.1 — no numpy 2.x). Two dead ends
 worth remembering: system pip is blocked by PEP 668

@@ -15,13 +15,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     less \
     ca-certificates \
-    gnuplot-nox \
+    locales-all \
     nodejs \
     npm \
-    locales-all \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Claude Code CLI globally
+# Install Claude Code CLI globally. This is the only reason nodejs and npm are
+# in this image: npm is the installer, and the npm package is how we get the
+# CLI. Node itself is NOT a runtime dependency — the package ships a native
+# ELF executable (bin/claude.exe, ~263 MB, linked only against libc/libm/
+# libpthread/librt/libdl), which /usr/local/bin/claude symlinks to. Verified:
+# `claude --version` works with node moved off PATH. See TODO for the
+# multi-stage build that would drop nodejs/npm (~195 MB) on that basis.
 RUN npm install -g @anthropic-ai/claude-code
 
 # Add red "SB" prompt marker so sandbox shells are obvious.
