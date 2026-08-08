@@ -124,7 +124,8 @@ Docker images and memory volumes are cached by project name for speed.
 aisand rebuild
 ```
 
-This deletes the old image and builds a fresh one, then launches the container.
+This deletes the old image and builds a fresh one, then launches Claude Code. Extra
+arguments after `rebuild` are passed through to `claude`.
 
 **Clean up all aisand images and volumes:**
 
@@ -171,5 +172,7 @@ Don't run `claude update` inside the container — Claude Code is installed syst
 - **Project mount.** Git repo bind-mounted at its actual host path inside the container.
 - **Memory volume.** Named volume `aisand-{repo-name-safe}-{path-hash}-memory` mounted at `$HOME/.claude`. The path hash prevents collisions between same-named repos in different locations.
 - **Home tmpfs.** `$HOME` is a tmpfs so tools that write to `~/.gitconfig`, `~/.cache`, etc. work without polluting the host.
-- **Subcommands.** `aisand rebuild` (delete image, rebuild, launch) and `aisand prune` (remove all aisand images and volumes).
+- **Argument dispatch.** No arguments, or a first argument starting with `-`, runs `claude --dangerously-skip-permissions "$@"` as the container command; `shell`/`sh`/`bash` runs `/bin/bash "$@"`; `rebuild` and `prune` are handled as below; anything else prints usage and exits 1. The command replaces the image's `CMD`, so the entrypoint still seeds `~/.claude.json` first. `/bin/bash` rather than `$SHELL` because `$SHELL` is the *host's* shell and need not exist in the image — `/bin/bash` is what the generated `/etc/passwd` names.
+- **Permissions bypass.** `--dangerously-skip-permissions` is unconditional. The container is the trust boundary; per-tool prompts inside it buy nothing and cost a lot of interaction. This is why aisand does not need a pre-allow list in `~/.claude/settings.json`.
+- **Subcommands.** `aisand rebuild` (delete image, rebuild, launch Claude Code) and `aisand prune` (remove all aisand images and volumes).
 - **Entrypoint.** `aisand-entrypoint` is a tiny script baked into the image. It writes `~/.claude.json` from the `AISAND_CLAUDE_CONFIG` env var (set by the launch script) before exec'ing the requested command. This is how first-run dialogs get pre-answered every session.

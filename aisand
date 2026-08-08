@@ -18,27 +18,60 @@ fi
 # A single image is shared across all aisand projects.
 IMAGE_TAG="aisand"
 
-if [ "$1" == "prune" ]; then
-  echo "Removing all aisand images and volumes..."
-  docker images -q --filter 'reference=aisand*' \
-    | xargs --no-run-if-empty docker rmi -f
-  docker volume ls -q --filter 'name=^aisand-' \
-    | xargs --no-run-if-empty docker volume rm
-  echo "Cleanup complete."
-  exit 0
-fi
+usage() {
+  cat <<'EOF'
+Usage: cd /path/to/git/repo && aisand [claude-options...]
+                        run Claude Code in the sandbox (permissions bypassed;
+                        the container is the trust boundary)
+       aisand shell | sh | bash [args...]
+                        run an interactive shell in the sandbox
+       aisand rebuild [claude-options...]
+                        delete and rebuild the Docker image, then run Claude Code
+       aisand prune     remove all aisand images and volumes
+EOF
+}
 
+# Argument dispatch. Anything that isn't a recognized subcommand is either a
+# claude option (leading '-') or a mistake. The chosen command is handed to
+# `docker run` at the bottom of this script, replacing the image's CMD.
+#
+# --dangerously-skip-permissions is always passed: the whole point of aisand is
+# that the container, not Claude Code's permission prompts, is the trust
+# boundary. /bin/bash rather than $SHELL because $SHELL is the host's shell and
+# need not exist in the image; /bin/bash is what the generated /etc/passwd says.
 REBUILD=0
-if [ "$1" == "rebuild" ]; then
-  REBUILD=1
-fi
+case "${1-}" in
+  ""|-*)
+    CONTAINER_CMD=(claude --dangerously-skip-permissions "$@")
+    ;;
+  shell|sh|bash)
+    shift
+    CONTAINER_CMD=(/bin/bash "$@")
+    ;;
+  rebuild)
+    REBUILD=1
+    shift
+    CONTAINER_CMD=(claude --dangerously-skip-permissions "$@")
+    ;;
+  prune)
+    echo "Removing all aisand images and volumes..."
+    docker images -q --filter 'reference=aisand*' \
+      | xargs --no-run-if-empty docker rmi -f
+    docker volume ls -q --filter 'name=^aisand-' \
+      | xargs --no-run-if-empty docker volume rm
+    echo "Cleanup complete."
+    exit 0
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac
 
 # Allow .git to be either a directory (normal clone) or a file (worktree)
 if [ ! -e .git ]; then
   echo "Error: Not in a git repository root (no .git found)"
-  echo "Usage: cd /path/to/git/repo && aisand"
-  echo "       aisand rebuild   (delete and rebuild Docker image, then launch)"
-  echo "       aisand prune     (remove all aisand images and volumes)"
+  usage
   exit 1
 fi
 
@@ -212,9 +245,9 @@ for f in /etc/apache2/*.crt /etc/apache2/*.key /etc/apache2/*.chain.pem; do
 done
 shopt -u nullglob
 
-echo "Launching interactive shell..."
+echo "Launching: ${CONTAINER_CMD[*]}"
 echo "Project: $REPO_ROOT"
-echo "Exit with Ctrl+D or 'exit' to destroy the container"
+echo "Exiting the command destroys the container"
 echo ""
 
 docker run --rm -it \
@@ -237,7 +270,8 @@ docker run --rm -it \
   "${GITCONFIG_MOUNT[@]}" \
   "${PORT_FLAGS[@]}" \
   "${SSL_CERT_MOUNTS[@]}" \
-  "$IMAGE_TO_USE"
+  "$IMAGE_TO_USE" \
+  "${CONTAINER_CMD[@]}"
 
 echo ""
 echo "Container destroyed. Project files and memory remain on disk."

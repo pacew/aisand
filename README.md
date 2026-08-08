@@ -37,14 +37,18 @@ cd ~/projects/my-project
 aisand
 ```
 
-You land in a shell inside the container, in your project directory, with a red `SB` prompt marker so it's obvious you're in the sandbox. Run `claude` and work normally. When you exit (`Ctrl+D`), the container is destroyed. Your project files and Claude's memory (`~/.claude/`) persist on the host.
+That launches Claude Code inside the container, in your project directory, with `--dangerously-skip-permissions` — the container, not Claude Code's permission prompts, is the trust boundary here. Any extra arguments are passed straight through to `claude`, so `aisand --model sonnet` and `aisand -c` work as you'd expect.
+
+For a plain shell instead, use `aisand shell` (or `sh`, or `bash`). It has a red `SB` prompt marker so it's obvious you're in the sandbox. Arguments after `shell` go to bash, so `aisand sh -c pytest` runs a one-shot command in the sandbox.
+
+When you exit (`Ctrl+D`), the container is destroyed. Your project files and Claude's memory (`~/.claude/`) persist on the host.
 
 ## A typical session
 
 ```bash
 cd ~/projects/my-project
-aisand                # inside: collaborate with Claude
-exit
+aisand                # collaborate with Claude in the sandbox
+# Ctrl+D
 
 meld .                # on host: look at what changed
 git diff
@@ -55,11 +59,12 @@ Anything that touches credentials or external systems — `git push`, deploying,
 
 ## Two terminals at once
 
-A second `aisand` in the same project attaches to the same container state and memory, so you can have Claude in one terminal and `pytest` (or a build, or a shell) in another.
+`aisand shell` in a second terminal on the same project shares the project mount and memory volume, so you can have Claude in one terminal and `pytest` (or a build, or a shell) in another.
 
 ## Subcommands
 
-- `aisand rebuild` — rebuild the Docker image. Use after editing the Dockerfile or to pick up updates to the base image.
+- `aisand shell` / `sh` / `bash` — interactive shell in the sandbox instead of Claude Code.
+- `aisand rebuild` — rebuild the Docker image, then launch Claude Code. Use after editing the Dockerfile or to pick up updates to the base image.
 - `aisand prune` — remove all aisand images and memory volumes. Destructive; you lose Claude's memory for every project.
 
 ## More
