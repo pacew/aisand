@@ -38,10 +38,13 @@ Usage: cd /path/to/git/repo && aisand [claude-options...]
        aisand delete PKG...
                         remove apt packages from the every-project list
        aisand list      show the config files and the resulting package list
-       aisand prune     remove all aisand images and volumes
+       aisand prune     remove all aisand images; memory volumes are kept
+       aisand memory    list memory volumes with project, size, and age
+       aisand forget [PATH...]
+                        delete the memory volume for those projects (default: .)
 
 Every-project packages live in $USER_CONFIG
-Per-project packages and ports live in ./aisand.json
+Per-project packages, pip packages, and ports live in ./aisand.json
 EOF
 }
 
@@ -67,7 +70,26 @@ edit_user_config() {
 
 show_packages() {
   local file="$1"
-  jq -r '(.extra_packages // []) | if length == 0 then "  (none)" else map("  " + .) | .[] end' "$file"
+  jq -r '
+    (.extra_packages // []) as $apt | (.pip_packages // []) as $pip |
+    if ($apt + $pip | length) == 0 then "  (none)"
+    else
+      (if ($apt | length) > 0 then "  apt:", ($apt[] | "    " + .) else empty end),
+      (if ($pip | length) > 0 then "  pip:", ($pip[] | "    " + .) else empty end)
+    end
+  ' "$file"
+}
+
+# Memory volume name for a project directory. Must match what the launch path
+# below creates: basename for legibility, path hash so that same-named repos in
+# different directories stay apart. The hash is one-way, which is why volumes
+# also carry an aisand.repo_root label (see `aisand memory`).
+memory_volume_for() {
+  local root name_safe hash
+  root="$(cd "$1" && pwd)"
+  name_safe="$(printf '%s' "$(basename "$root")" | tr -c 'a-zA-Z0-9._-' '_')"
+  hash="$(printf '%s' "$root" | sha256sum | cut -c1-8)"
+  echo "aisand-${name_safe}-${hash}-memory"
 }
 
 # Argument dispatch. Anything that isn't a recognized subcommand is either a
@@ -123,12 +145,67 @@ case "${1-}" in
     exit 0
     ;;
   prune)
-    echo "Removing all aisand images and volumes..."
+    # Images only. They are wholly derivable from the Dockerfile plus the two
+    # config files, so destroying them costs a rebuild and nothing else. Memory
+    # volumes are the one artifact here that cannot be regenerated from
+    # anything on disk, and they are a rounding error on disk anyway (tens of
+    # MB against multiple GB of images), so sweeping them up was never buying
+    # space. Deleting memory now requires `aisand forget`.
+    echo "Removing all aisand images..."
     docker images -q --filter 'reference=aisand*' \
       | xargs --no-run-if-empty docker rmi -f
-    docker volume ls -q --filter 'name=^aisand-' \
-      | xargs --no-run-if-empty docker volume rm
-    echo "Cleanup complete."
+    KEPT="$(docker volume ls -q --filter 'name=^aisand-' | grep -c -- '-memory$' || true)"
+    echo "Cleanup complete. Kept $KEPT memory volumes — see \`aisand memory\`"
+    exit 0
+    ;;
+  memory)
+    need_jq
+    CURRENT=""
+    [ -e .git ] && CURRENT="$(memory_volume_for .)"
+    # `docker volume ls` reports no size and `docker volume inspect` no size
+    # either; only `system df -v` knows, at the cost of a full scan. That is
+    # why size lives here and not in prune's summary line.
+    printf '%s %-38s %-30s %-10s %s\n' " " VOLUME PROJECT SIZE CREATED
+    docker system df -v --format '{{json .Volumes}}' \
+      | jq -r --arg current "$CURRENT" '
+          [ .[] | select(.Name | test("^aisand-.*-memory$")) ]
+          | sort_by(.Name)[] as $v
+          | (($v.Labels // "") | split(",")
+              | map(select(startswith("aisand.repo_root=")))
+              | (.[0] // "") | sub("^aisand\\.repo_root="; "")) as $root
+          | [ (if $v.Name == $current then "*" else " " end),
+              $v.Name,
+              # Unlabeled volume: the path hash is one-way, so fall back to the
+              # basename the name already carries. Done here rather than in the
+              # shell because tab is an IFS whitespace character, so `read`
+              # collapses empty fields and would shift every later column.
+              (if $root == "" then
+                 ($v.Name | sub("^aisand-"; "") | sub("-[0-9a-f]{8}-memory$"; "")) + " (?)"
+               else $root end),
+              $v.Size ]
+          | @tsv' \
+      | while IFS=$'\t' read -r mark name proj size; do
+          created="$(docker volume inspect -f '{{.CreatedAt}}' "$name" | cut -c1-10)"
+          printf '%s %-38s %-30s %-10s %s\n' "$mark" "$name" "$proj" "$size" "$created"
+        done
+    exit 0
+    ;;
+  forget)
+    shift
+    [ $# -eq 0 ] && set -- .
+    for target in "$@"; do
+      # Without this the failing `cd` inside memory_volume_for still returns a
+      # name — built from an empty basename and the hash of an empty string —
+      # and we would report on a volume nobody has.
+      [ -d "$target" ] || { echo "Error: no such directory: $target"; exit 1; }
+      VOL="$(memory_volume_for "$target")"
+      if docker volume inspect "$VOL" > /dev/null 2>&1; then
+        docker volume rm "$VOL" > /dev/null
+        echo "Deleted $VOL"
+      else
+        echo "No memory volume for $target ($VOL)"
+      fi
+    done
     exit 0
     ;;
   *)
@@ -151,10 +228,8 @@ if [ -z "$ANTHROPIC_API_KEY" ]; then
 fi
 
 REPO_ROOT="$(pwd)"
-REPO_NAME="$(basename "$REPO_ROOT")"
-REPO_NAME_SAFE="$(echo -n "$REPO_NAME" | tr -c 'a-zA-Z0-9._-' '_')"
-PATH_HASH="$(echo -n "$REPO_ROOT" | sha256sum | cut -c1-8)"
-MEMORY_VOLUME="aisand-${REPO_NAME_SAFE}-${PATH_HASH}-memory"
+REPO_NAME_SAFE="$(printf '%s' "$(basename "$REPO_ROOT")" | tr -c 'a-zA-Z0-9._-' '_')"
+MEMORY_VOLUME="$(memory_volume_for "$REPO_ROOT")"
 
 PROJECT_CONFIG="$REPO_ROOT/aisand.json"
 
@@ -164,12 +239,17 @@ PROJECT_CONFIG="$REPO_ROOT/aisand.json"
 #     extra_packages : apt packages wanted in every project
 #   $PROJECT_CONFIG         (./aisand.json, hand-edited, may be committed)
 #     extra_packages : apt packages wanted only in this project
+#     pip_packages   : Python packages for a venv at /opt/venv
 #     html_port      : int, forwarded as -p N:N (host → container, same port)
 #     ssl_port       : int, ditto
 #
-# The two extra_packages lists are unioned into one derivative image. Ports are
-# project-only; they describe a specific application, not a user preference.
+# extra_packages and pip_packages are each unioned across the two layers and
+# baked into one derivative image. Ports are project-only; they describe a
+# specific application, not a user preference. pip_packages is accepted at
+# either layer for symmetry, but belongs in the project file in practice — a
+# user-level Python dep would be installed into every project's image.
 EXTRA_PACKAGES=""
+PIP_PACKAGES=""
 HTML_PORT=""
 SSL_PORT=""
 
@@ -180,6 +260,7 @@ CONFIG_FILES=()
 if [ ${#CONFIG_FILES[@]} -gt 0 ]; then
   need_jq
   EXTRA_PACKAGES="$(jq -rs 'map(.extra_packages // []) | add | unique | join(" ")' "${CONFIG_FILES[@]}")"
+  PIP_PACKAGES="$(jq -rs 'map(.pip_packages   // []) | add | unique | join(" ")' "${CONFIG_FILES[@]}")"
 fi
 
 if [ -f "$PROJECT_CONFIG" ]; then
@@ -187,15 +268,20 @@ if [ -f "$PROJECT_CONFIG" ]; then
   SSL_PORT="$(jq -r '.ssl_port  // empty' "$PROJECT_CONFIG")"
 fi
 
-# If extra_packages is non-empty, layer them onto the shared base image in a
-# derivative image tagged by a hash of the package set itself. Every project
-# asking for the same packages therefore shares one image, and editing either
-# config file names a different tag — so the tag *is* the cache key and there
-# is nothing to invalidate. jq's `unique` has already sorted and deduped the
-# list, so the hash does not depend on the order the packages were added in.
+# If either package list is non-empty, layer them onto the shared base image in
+# a derivative image tagged by a hash of the package sets themselves. Every
+# project asking for the same packages therefore shares one image, and editing
+# either config file names a different tag — so the tag *is* the cache key and
+# there is nothing to invalidate. jq's `unique` has already sorted and deduped
+# both lists, so the hash does not depend on the order packages were added in.
+#
+# One hash over both lists, not one per list: the image is a function of the
+# pair, so two hashes would name something that does not exist. The newline
+# keeps apt=[x],pip=[] distinct from apt=[],pip=[x].
 DERIVED_IMAGE=""
-if [ -n "$EXTRA_PACKAGES" ]; then
-  DERIVED_IMAGE="aisand-pkgs-$(echo -n "$EXTRA_PACKAGES" | sha256sum | cut -c1-12)"
+if [ -n "$EXTRA_PACKAGES" ] || [ -n "$PIP_PACKAGES" ]; then
+  DERIVED_IMAGE="aisand-pkgs-$(printf '%s\n%s' "$EXTRA_PACKAGES" "$PIP_PACKAGES" \
+    | sha256sum | cut -c1-12)"
 fi
 IMAGE_TO_USE="${DERIVED_IMAGE:-$IMAGE_TAG}"
 
@@ -206,6 +292,7 @@ echo "Repository:    $REPO_ROOT"
 echo "Image:         $IMAGE_TO_USE"
 echo "Memory volume: $MEMORY_VOLUME"
 [ -n "$EXTRA_PACKAGES" ] && echo "Extra pkgs:    $EXTRA_PACKAGES"
+[ -n "$PIP_PACKAGES" ] && echo "Pip pkgs:      $PIP_PACKAGES (venv at /opt/venv, first on PATH)"
 [ -n "$HTML_PORT" ] && echo "HTML port:     $HTML_PORT (host → container)"
 [ -n "$SSL_PORT" ]  && echo "SSL port:      $SSL_PORT (host → container)"
 echo ""
@@ -226,30 +313,67 @@ else
   echo "Using cached base image"
 fi
 
-# The tag encodes the package set, so mere existence means it is current. The
-# label records the human-readable list, so `docker image inspect` (or
+# The tag encodes the package sets, so mere existence means it is current. The
+# labels record the human-readable lists, so `docker image inspect` (or
 # `docker images --filter label=...`) can say what a hashed tag contains.
+#
+# apt runs before pip because a wheel may need headers or libraries from it.
+#
+# The venv is deliberately NOT --system-site-packages. With system site
+# packages visible, pip's resolver counts Debian's python3-numpy (1.24.2 on
+# bookworm) as satisfying an unpinned `numpy` requirement and silently declines
+# to install a current one; the failure then surfaces as a confusing error deep
+# inside whatever needed the newer numpy. An isolated venv gives one coherent
+# Python instead of an apt/pip mixture whose behaviour depends on resolution
+# order. Consequence: apt python3-* packages are invisible to `python3` once
+# pip_packages is set — put those deps in pip_packages instead.
+# /usr/bin/python3 still reaches the system interpreter if it is ever wanted.
+#
+# --no-cache-dir because changing pip_packages invalidates this layer wholesale
+# anyway, so a baked pip cache would only inflate the image.
 if [ -n "$DERIVED_IMAGE" ]; then
   if docker image inspect "$DERIVED_IMAGE" > /dev/null 2>&1; then
     echo "Using cached derived image"
   else
-    echo "Building derived image with extra packages: $EXTRA_PACKAGES"
+    APT_STANZA=""
+    if [ -n "$EXTRA_PACKAGES" ]; then
+      APT_STANZA="RUN apt-get update && apt-get install -y --no-install-recommends \\
+    $EXTRA_PACKAGES \\
+    && rm -rf /var/lib/apt/lists/*"
+    fi
+
+    PIP_STANZA=""
+    if [ -n "$PIP_PACKAGES" ]; then
+      PIP_STANZA="RUN python3 -m venv /opt/venv \\
+    && /opt/venv/bin/pip install --no-cache-dir --upgrade pip wheel \\
+    && /opt/venv/bin/pip install --no-cache-dir $PIP_PACKAGES
+ENV PATH=/opt/venv/bin:\$PATH"
+    fi
+
+    echo "Building derived image"
+    [ -n "$EXTRA_PACKAGES" ] && echo "  apt: $EXTRA_PACKAGES"
+    [ -n "$PIP_PACKAGES" ] && echo "  pip: $PIP_PACKAGES"
     docker build -t "$DERIVED_IMAGE" \
       --label "aisand.extra_packages=$EXTRA_PACKAGES" \
+      --label "aisand.pip_packages=$PIP_PACKAGES" \
       - <<EOF
 FROM $IMAGE_TAG
-RUN apt-get update && apt-get install -y --no-install-recommends \\
-    $EXTRA_PACKAGES \\
-    && rm -rf /var/lib/apt/lists/*
+$APT_STANZA
+$PIP_STANZA
 EOF
   fi
 fi
 
 # Create the memory volume if needed, and chown it to the host user so
 # the non-root container process can write to it.
+#
+# The aisand.repo_root label is what lets `aisand memory` name the project a
+# volume belongs to: the volume name only carries a basename plus a one-way
+# path hash. Docker has no way to add a label to an existing volume, so volumes
+# created before this label existed stay unlabeled and show only a basename.
 if ! docker volume inspect "$MEMORY_VOLUME" > /dev/null 2>&1; then
   echo "Creating memory volume..."
-  docker volume create "$MEMORY_VOLUME" > /dev/null
+  docker volume create --label "aisand.repo_root=$REPO_ROOT" "$MEMORY_VOLUME" > /dev/null
   echo "Initializing memory volume ownership..."
   docker run --rm --user root \
     -v "$MEMORY_VOLUME:/init" \

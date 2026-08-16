@@ -2,6 +2,8 @@
 
 # aisand: a Docker sandbox for Claude Code
 
+*If you are an AI assistant reading this because you were told you're running inside aisand, skip to [If you are Claude Code running inside aisand](#if-you-are-claude-code-running-inside-aisand). The rest is written for the human.*
+
 ## What this is, and why you might want it
 
 Claude Code is an AI coding assistant that runs on your machine. Part of what makes it useful is that it can do real things on your computer: run shell commands, edit files in your project, install packages, hit web APIs, search the web for documentation. That's also where the risk lives.
@@ -63,8 +65,11 @@ Anything that touches credentials or external systems — `git push`, deploying,
 
 ## Extra packages
 
-The base image is deliberately small. Packages you want everywhere go in your
-user config:
+The base image carries a small general-purpose set of tools, and each project declares whatever else it needs.
+
+This is **not** an exercise in minimizing image size. It just recognizes that there are far more packages in the world than any one project needs, and that an explicit list is a useful record of what this project actually depends on. Adding a package that turns out not to be especially useful costs you a rebuild and nothing else — so if you think you might want it, add it. There's no need to agonize over the list.
+
+Packages you want everywhere go in your user config:
 
 ```bash
 aisand add texlive-latex-base python3-numpy
@@ -76,28 +81,59 @@ These live in `~/.config/aisand/config.json` (or `$XDG_CONFIG_HOME/aisand/config
 Each command prints the file's full path so you can edit it by hand.
 
 Packages needed by one project only go in that project's `./aisand.json`, which
-uses the same format and can also declare ports:
+uses the same format and can also declare Python packages and ports:
 
 ```json
 {
-  "extra_packages": ["ghostscript"],
+  "extra_packages": ["libgl1", "admesh"],
+  "pip_packages": ["build123d", "trimesh"],
   "html_port": 9999,
   "ssl_port": 9443
 }
 ```
 
-Both `extra_packages` lists are unioned and installed into a derivative image
-layered on the shared base, tagged `aisand-pkgs-<hash of the package list>`.
+Both lists are unioned across the two config files and baked into a derivative
+image layered on the shared base, tagged `aisand-pkgs-<hash of both lists>`.
 Projects wanting the same packages share one image; changing either list builds a
-new one on the next launch. Everything is `apt` only — see the note in
-[TODO](TODO) about pip.
+new one on the next launch.
+
+`pip_packages` installs into a venv at `/opt/venv`, which is put first on `PATH`.
+The venv is **not** `--system-site-packages`, so once you use `pip_packages`,
+`python3` no longer sees apt-installed `python3-*` modules — put those deps in
+`pip_packages` too (`numpy`, not `python3-numpy`). The isolation is deliberate:
+with system packages visible, pip counts Debian's numpy 1.24.2 as satisfying an
+unpinned `numpy` requirement and silently skips installing a current one.
+
+The venv lives in an image layer, so `pip install` inside a running container
+will fail — add the package to `aisand.json` and relaunch instead.
+
+## If you are Claude Code running inside aisand
+
+This section is addressed to you, the assistant, not to the human.
+
+You are running inside an aisand container. The git repository you were launched from is the only part of the user's filesystem you can see, and it is bind-mounted read-write. Everything else — the host home directory, other projects, SSH keys — is not present. The container is destroyed when the session ends.
+
+**You cannot install packages yourself.** You are not root, so `apt-get install` will fail. The system Python is marked externally-managed (PEP 668), and when a project uses `pip_packages` the venv at `/opt/venv` is a read-only image layer, so `pip install` will fail too. This is by design, not a misconfiguration to route around.
+
+When you need a package that isn't installed:
+
+1. **Do not work around it.** Don't vendor a copy into the repo, don't reach for `--break-system-packages` or `--user`, don't reimplement the library by hand, and don't quietly narrow the task to avoid needing it. Any of those leaves the user with a worse result than simply asking.
+2. **Add it to `./aisand.json`** yourself — `extra_packages` for Debian/apt packages, `pip_packages` for Python ones. Create the file if it isn't there. Adding something that's already installed is harmless; the lists are merged and deduplicated, and a package may already be present because the user's own config supplies it (that config lives on the host and isn't visible to you).
+3. **Tell the user what you added and why**, in one or two sentences. Name the package and the thing you couldn't do without it.
+4. **Ask them to exit Claude Code and run `aisand --resume`.**
+
+That last step is the whole loop. Changing the package list changes the image's content-derived tag, so aisand builds the new layer on the next launch, and `--resume` reopens this conversation from the memory volume — which survives the container. You lose nothing but the time it takes to build. (`aisand -c` continues the most recent session in that directory without showing a picker.)
+
+Being liberal about this is fine. The package list exists to record what the project needs, not to be kept minimal, so don't hesitate to ask for something you'd merely find useful. What isn't fine is silently doing without.
 
 ## Subcommands
 
 - `aisand shell` / `sh` / `bash` — interactive shell in the sandbox instead of Claude Code. Arguments are passed to bash.
 - `aisand add PKG...` / `aisand delete PKG...` / `aisand list` — manage the every-project package list.
 - `aisand rebuild` — rebuild the Docker image, then launch Claude Code. Use after editing the Dockerfile or to pick up updates to the base image.
-- `aisand prune` — remove all aisand images and memory volumes. Destructive; you lose Claude's memory for every project.
+- `aisand prune` — remove all aisand images. Memory volumes are kept; images rebuild themselves, memory can't be regenerated.
+- `aisand memory` — list memory volumes with the project they belong to, size, and creation date. The current project is marked `*`.
+- `aisand forget [PATH...]` — delete the memory volume for those projects (default: the current directory). There is deliberately no `--all`; to wipe everything, read `aisand memory` and use `docker volume rm`.
 
 ## More
 

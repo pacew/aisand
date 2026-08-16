@@ -127,21 +127,39 @@ aisand rebuild
 This deletes the old image and builds a fresh one, then launches Claude Code. Extra
 arguments after `rebuild` are passed through to `claude`.
 
-**Clean up all aisand images and volumes:**
+**Clean up all aisand images:**
 
 ```bash
 aisand prune
 ```
 
-This removes all `aisand-*` images and volumes. Use with care — you'll lose Claude's memory for all projects.
+This removes all `aisand-*` images. Memory volumes are kept, so it is safe to run
+whenever disk space is wanted — images are wholly derivable from the Dockerfile
+and the config files, and rebuild themselves on the next launch.
+
+**Inspect memory volumes:**
+
+```bash
+aisand memory
+```
+
+Shows each volume with the project it belongs to, its size, and when it was
+created; the current directory's volume is marked `*`. Volumes carry an
+`aisand.repo_root` label so the project path can be recovered — the path hash in
+the volume name is one-way. Volumes created before that label existed show only
+the basename, followed by `(?)`; Docker cannot add a label to an existing volume.
 
 **Delete memory for a specific project:**
 
 ```bash
-docker volume rm aisand-my-project-memory
+aisand forget                       # the current directory
+aisand forget ~/projects/foo ~/bar  # named projects
 ```
 
-Next run will create a fresh memory volume.
+Next run will create a fresh memory volume. There is deliberately no `--all`:
+this is the one irreversible bulk operation in the tool, and not providing the
+verb is stronger protection than a confirmation prompt. To wipe everything, read
+`aisand memory` and pass the names to `docker volume rm`.
 
 Don't run `claude update` inside the container — Claude Code is installed system-wide and the non-root container user can't update it. Use `aisand rebuild` instead.
 
@@ -174,7 +192,9 @@ Don't run `claude update` inside the container — Claude Code is installed syst
 - **Home tmpfs.** `$HOME` is a tmpfs so tools that write to `~/.gitconfig`, `~/.cache`, etc. work without polluting the host.
 - **Argument dispatch.** No arguments, or a first argument starting with `-`, runs `claude --dangerously-skip-permissions "$@"` as the container command; `shell`/`sh`/`bash` runs `/bin/bash "$@"`; `rebuild` and `prune` are handled as below; anything else prints usage and exits 1. The command replaces the image's `CMD`, so the entrypoint still seeds `~/.claude.json` first. `/bin/bash` rather than `$SHELL` because `$SHELL` is the *host's* shell and need not exist in the image — `/bin/bash` is what the generated `/etc/passwd` names.
 - **Permissions bypass.** `--dangerously-skip-permissions` is unconditional. The container is the trust boundary; per-tool prompts inside it buy nothing and cost a lot of interaction. This is why aisand does not need a pre-allow list in `~/.claude/settings.json`.
-- **Config layers.** Two files, same JSON schema, so keys added later work at either level. `$XDG_CONFIG_HOME/aisand/config.json` (default `~/.config/aisand/config.json`) holds every-project settings and is managed by `aisand add|delete|list`; `./aisand.json` holds per-project settings and is hand-edited. `extra_packages` from both is unioned (`jq -rs 'map(.extra_packages // []) | add | unique'`); `html_port`/`ssl_port` are read only from the project file, since a port describes a specific application rather than a user preference. `jq` on the host is required only when at least one config file exists.
-- **Derivative image tag.** `aisand-pkgs-<sha256(package list)[:12]>`, computed from the merged, sorted, deduped list — so the tag *is* the cache key: existence means current, and every project asking for the same packages shares one image regardless of the order the packages were added in. There is no invalidation step; a changed list simply names a different tag. The `aisand.extra_packages` label records the human-readable list so `docker image inspect` can say what a hashed tag contains. Cost of this scheme: editing a package list orphans the old `aisand-pkgs-*` image instead of overwriting it. Layers are shared, so the disk cost is small, but the tags accumulate until `aisand prune`.
-- **Subcommands.** `aisand rebuild` (delete image, rebuild, launch Claude Code) and `aisand prune` (remove all aisand images and volumes).
+- **Config layers.** Two files, same JSON schema, so keys added later work at either level. `$XDG_CONFIG_HOME/aisand/config.json` (default `~/.config/aisand/config.json`) holds every-project settings and is managed by `aisand add|delete|list`; `./aisand.json` holds per-project settings and is hand-edited. `extra_packages` and `pip_packages` are each unioned across both files (`jq -rs 'map(.KEY // []) | add | unique'`); `html_port`/`ssl_port` are read only from the project file, since a port describes a specific application rather than a user preference. `jq` on the host is required only when at least one config file exists.
+- **Derivative image tag.** `aisand-pkgs-<sha256(apt list + "\n" + pip list)[:12]>`, computed from the merged, sorted, deduped lists — so the tag *is* the cache key: existence means current, and every project asking for the same packages shares one image regardless of the order the packages were added in. There is no invalidation step; a changed list simply names a different tag. One hash over both lists rather than one per list, because the image is a function of the pair; the newline separator keeps `apt=[x],pip=[]` distinct from `apt=[],pip=[x]`. The `aisand.extra_packages` and `aisand.pip_packages` labels record the human-readable lists so `docker image inspect` can say what a hashed tag contains. Cost of this scheme: editing a package list orphans the old `aisand-pkgs-*` image instead of overwriting it. Layers are shared, so the disk cost is small, but the tags accumulate until `aisand prune`.
+- **pip venv.** `pip_packages` generates a second `RUN` in the derived image that builds a venv at `/opt/venv` and prepends it to `PATH` via `ENV`. apt runs first, since a wheel may need headers or libraries from it. The venv is deliberately **not** `--system-site-packages`: with system packages visible, pip's resolver counts Debian's `python3-numpy` (1.24.2 on bookworm) as satisfying an unpinned `numpy` requirement and silently declines to install a current one, which then surfaces as a confusing error deep inside whatever needed the newer version. Isolation gives one coherent Python instead of an apt/pip mixture whose behaviour depends on resolution order; the consequence is that apt `python3-*` packages become invisible to `python3` once `pip_packages` is set, and those deps belong in `pip_packages` instead. `/usr/bin/python3` still reaches the system interpreter. `--no-cache-dir` throughout, because changing `pip_packages` invalidates the layer wholesale and a baked cache would only inflate the image. The venv is read-only at runtime (image layer, non-root user), so adding a package means editing `aisand.json` and relaunching.
+- **Memory volume identity.** `memory_volume_for()` derives `aisand-<basename>-<sha256(abs path)[:8]>-memory` and is used both by the launch path and by `aisand forget`, so the two cannot drift. The hash is one-way, so volumes also get an `aisand.repo_root` label at creation for `aisand memory` to display. `aisand memory` gets sizes from `docker system df -v` (neither `volume ls` nor `volume inspect` reports size) and dates from `docker volume inspect`. The unlabeled-volume fallback is computed inside the jq filter rather than in the shell: tab is an IFS *whitespace* character, so `read` collapses runs of it and an empty field would shift every later column.
+- **Subcommands.** `aisand rebuild` (delete image, rebuild, launch Claude Code), `aisand prune` (remove all aisand images, keep volumes), `aisand memory` (list memory volumes), `aisand forget` (delete memory volumes).
 - **Entrypoint.** `aisand-entrypoint` is a tiny script baked into the image. It writes `~/.claude.json` from the `AISAND_CLAUDE_CONFIG` env var (set by the launch script) before exec'ing the requested command. This is how first-run dialogs get pre-answered every session.

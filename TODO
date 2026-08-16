@@ -1,30 +1,25 @@
-don't clobber memory volumes with aisand prune
-
-editing a package list orphans the old aisand-pkgs-<hash> image rather
-than overwriting a per-project tag, so unused ones accumulate until
-prune. Cheap on disk (layers are shared) but untidy. Options: reap
-aisand-pkgs-* images not referenced by any current config at launch
-(racy — another project may be starting with that image), or a
-dedicated "aisand gc" that removes them without touching volumes.
-Probably wants the memory-volume fix above first.
+DONE (2026-08-14): aisand prune no longer touches memory volumes. It
+removes images only, which are wholly derivable from the Dockerfile
+plus the config files. Memory deletion moved to an explicit "aisand
+forget [PATH...]", and "aisand memory" lists volumes with project,
+size, and date. No --all on forget: it is the one irreversible bulk
+operation here and withholding the verb beats a confirmation prompt.
+This also retires the orphaned-aisand-pkgs-image note that used to
+live here — prune is now safe to run freely, so prune IS the gc.
 
 DONE (2026-08-08): pre-allowing tool permissions is moot — aisand now
 passes --dangerously-skip-permissions unconditionally, since the
 container is the trust boundary. No settings.json allow-list needed.
 
-drop nodejs and npm from the runtime image via a multi-stage build.
-They are build-time only: the @anthropic-ai/claude-code npm package
-ships bin/claude.exe, a native ELF binary (~263 MB) that links only
+WON'T DO (2026-08-08): multi-stage build to drop nodejs/npm from the
+runtime image. It would work — they are build-time only; the npm
+package ships bin/claude.exe, a native ELF binary that links only
 against libc/libm/libpthread/librt/libdl and runs with node off PATH
-(verified against image aisand, claude 2.1.220). A builder stage with
-nodejs+npm can npm install -g, and the final stage COPY --from just
-the binary to /usr/local/bin/claude. Saves ~195 MB: /usr/share/nodejs
-144M, libnode.so.108 46M, nodejs 4M, npm 3M. Needs a full rebuild and
-a real interactive session to confirm nothing shells out to node
-(e.g. npx-launched MCP servers would break, but aisand uses none).
-Note bin/claude.exe is hardlinked to
-node_modules/@anthropic-ai/claude-code-linux-x64/claude, so du
-double-counts the package at 520M when it is really ~263M.
+(verified against image aisand, claude 2.1.220) — and would save
+~195 MB. Rejected because minimizing the base image is not a goal;
+convenience of installing claude via npm is worth the space. Keep
+nodejs/npm as long as npm is the install method. The rule for this
+image is "nothing that serves no purpose", not "as small as possible".
 
 investigate whether claude update can be made to work for the
 non-root container user (e.g., installing claude into $HOME instead
@@ -38,19 +33,39 @@ fail until they configure one (on the host or inside the container).
 
 can the claude code prompt itself be modified to show when it is in the sandbox?
 
-extra_packages (both in ~/.config/aisand/config.json and in a project's
-aisand.json) is apt-only, so there is no first-class path
-for pip-only or newer-than-Debian Python deps (bookworm gives numpy
-1.24.2, matplotlib 3.6.3, scipy 1.10.1 — no numpy 2.x). Two dead ends
-worth remembering: system pip is blocked by PEP 668
-(/usr/lib/python3.11/EXTERNALLY-MANAGED), and pip install --user does
-not survive a run because $HOME is tmpfs. Only a venv inside the repo
-persists, since the repo is bind-mounted rw — but that puts build
-artifacts in the source tree and costs a rebuild on every fresh
-container.
-Idea: a pip_packages key that builds a venv into the derived image
-(e.g. /opt/venv, created at image build time, on PATH via ENV), so the
-install cost is paid once per package-set change like extra_packages
-already is. Do NOT reach for --break-system-packages.
-Open question: whether pip_packages and extra_packages should share
-one hash label or get separate ones.
+DONE (2026-08-14): pip_packages, implemented as sketched — a venv at
+/opt/venv built into the derived image and prepended to PATH, so the
+install cost is paid once per package-set change. The open question
+resolved to ONE hash over both lists, since the image is a function of
+the pair. Dead ends recorded here for future-me: system pip is blocked
+by PEP 668 (/usr/lib/python3.11/EXTERNALLY-MANAGED); pip install
+--user does not survive a run because $HOME is tmpfs; a venv inside
+the repo persists but puts build artifacts in the source tree. Do NOT
+reach for --break-system-packages. Deliberately not
+--system-site-packages either — see IMPLEMENTATION.md for why.
+
+DONE (2026-08-14): pip_packages verified against a real build in
+kaleidoscope (build123d, trimesh, numpy, pillow). Image
+aisand-pkgs-00a76ba863e6, 3.25 GB against a 1.69 GB base; /opt/venv is
+802 MB. cadquery-ocp resolves to the novtk wheel
+(cp311/manylinux_2_31, 67.6 MB) so nothing builds from source — the
+base image's Python 3.11 and glibc 2.36 are what make that wheel
+eligible, worth remembering before any base-image bump. The venv gets
+numpy 2.4.6, which was the whole point: bookworm apt caps at 1.24.2.
+tests/smoke_cad.py in kaleidoscope passes; its reported volume matches
+the analytic value to three decimals, so the geometry is right and not
+merely non-crashing.
+
+kaleidoscope's X/GL list is larger than OCP actually needs. ldd on the
+one OCP .so shows only libGL.so.1 and libX11.so.6 (plus libGLX and
+libGLdispatch pulled in by libGL); fontconfig and freetype are
+VENDORED into the wheel (libfontconfig-ebabad56.so.1.12.0), so the apt
+copies go unused. Unreferenced: libglu1-mesa, libxext6, libxrender1,
+libxi6, libsm6, libice6, libfontconfig1, libfreetype6. Trimming buys
+little — apt reported gnuplot-nox, libfontconfig1, libfreetype6,
+libx11-6, libxext6 and libxrender1 as already present in the base, so
+only libglu1-mesa, libice6, libsm6 and libxi6 are genuinely extra, and
+they are small. The bulk of the apt cost is libgl1's own tree
+(libgl1-mesa-dri, libllvm15), and libgl1 is required. Caveat if
+trimming anyway: ldd shows direct DT_NEEDED only, so anything dlopened
+at runtime would not appear in that list.
